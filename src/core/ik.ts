@@ -284,7 +284,7 @@ export function lookAt(rig: Rig, pose: Pose, boneName: string, targetPoint: Vec3
   const J = xmul(P, b.pre)
   const toRig = qinv(restJoint(rig, boneName).q)
   // Rest forward/up of the rig expressed through this joint's current (un-animated) frame.
-  const fwd0 = qrot(J.q, qrot(toRig, [0, 0, -1]))
+  const fwd0 = qrot(J.q, qrot(toRig, rig.forward ?? [0, 0, -1]))
   const up0 = qrot(J.q, qrot(toRig, [0, 1, 0]))
   const headPos = xpoint(xmul(J, b.post), [0, 0, 0])
   const dir = vnorm(vsub(targetPoint, headPos), fwd0)

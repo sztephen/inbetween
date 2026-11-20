@@ -65,6 +65,8 @@ export interface Rig {
   /** Bone used for look-at. */
   head?: string
   chains: IKChainDef[]
+  /** Direction the rig faces at rest, in rig space. Default [0,0,-1] (Roblox). glTF rigs face +Z. */
+  forward?: Vec3
   /** Placement of the rig in the scene. */
   origin: Xform
   /** External mesh for display/export (glTF rigs). */
