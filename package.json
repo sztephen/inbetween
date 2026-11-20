@@ -16,7 +16,8 @@
     "test:e2e": "npm run build && node scripts/e2e.mjs",
     "ffmpeg": "node scripts/fetch-ffmpeg.mjs --current",
     "dist:mac": "npm run build && node scripts/fetch-ffmpeg.mjs darwin-arm64 darwin-x64 && electron-builder --mac dmg --arm64 --x64 --publish never",
-    "dist:win": "npm run build && node scripts/fetch-ffmpeg.mjs win32-x64 && electron-builder --win nsis --x64 --publish never"
+    "dist:win": "npm run build && node scripts/fetch-ffmpeg.mjs win32-x64 && electron-builder --win nsis --x64 --publish never",
+    "postinstall": "install-electron"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.11.0",
