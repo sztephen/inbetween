@@ -1,6 +1,9 @@
 import { resolve } from 'node:path'
 import { builtinModules } from 'node:module'
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
+
+const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
 // Bundles the stdio MCP launcher into one dependency-free CommonJS file so it can be
 // run with plain Node or with the packaged app binary (ELECTRON_RUN_AS_NODE=1).
@@ -15,7 +18,7 @@ export default defineConfig({
     rollupOptions: {
       input: resolve(__dirname, 'src/launcher/inbetween-mcp.ts'),
       external: [...builtinModules, ...builtinModules.map((m) => `node:${m}`)],
-      output: { format: 'cjs', entryFileNames: 'inbetween-mcp.cjs', inlineDynamicImports: true }
+      output: { format: 'cjs', entryFileNames: 'inbetween-mcp.cjs', codeSplitting: false }
     }
   },
   ssr: { noExternal: true }

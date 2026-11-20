@@ -24,6 +24,8 @@ export interface PreviewRequest {
   /** Chain or bone names to draw motion trails for. */
   trails: string[]
   cellSize: number
+  /** Rig whose eyes first-person views look through. */
+  subjectRigId?: string
 }
 
 export interface VideoRequest {
@@ -38,6 +40,8 @@ export interface VideoRequest {
   background: string
   /** 'track' uses the clip's camera track; otherwise a named view. */
   camera: string
+  /** Rig for first-person cameras. */
+  rigId?: string
 }
 
 /** Services the surrounding app provides to tools (rendering, files). Tests supply fakes. */

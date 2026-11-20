@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { contactsAt, createClip, evaluateRig, getClip, getRig, keyFrames, newId, removeKeyAt, sampleCamera } from '../clip'
 import { EASE_DIRS, EASE_STYLES, TIMING_PRESETS } from '../easing'
 import { exportGlb } from '../export/gltf'
+import { effectorsInView, eyeUnproject, FIRST_PERSON_FOV, restEye } from '../firstPerson'
 import { exportRbxmx } from '../export/rbxmx'
 import { importGlbRig } from '../import/gltf'
 import { importRobloxRig } from '../import/robloxRig'
@@ -99,6 +100,14 @@ export function buildTools(): ToolDef[] {
         conventions: CONVENTIONS,
         dimensions: { height: round(b.max[1] - b.min[1]), width: round(b.max[0] - b.min[0]), depth: round(b.max[2] - b.min[2]), bounds_min: r(b.min), bounds_max: r(b.max) },
         hips_bone: rig.hips, hips_rest_world: r(rest.bone[rig.hips].p), head_bone: rig.head,
+        first_person: rig.head ? (() => {
+          const eye = restEye(rig)
+          return {
+            eye_world: r(eye.position), looks_along: r(eye.forward), fov_deg: FIRST_PERSON_FOV,
+            note: 'In first person the player sees from eye_world looking along looks_along; the head is hidden and only what is in front of the eye shows. ' +
+              'Hands hanging at the sides are out of the picture. Use a goal\'s `view` [x, y, depth] to place a hand in the picture directly.'
+          }
+        })() : undefined,
         bones: rig.bones.map((x) => ({
           name: x.name, parent: x.parent,
           joint_world: r(rest.joint[x.name].p), center_world: r(rest.bone[x.name].p),
@@ -325,6 +334,7 @@ export function buildTools(): ToolDef[] {
       'Goal positions are absolute scene coordinates: use get_rig for rest positions and max reach. A foot goal at y=0 is flat on the ground. ' +
       'Goal rotation is relative to the end bone\'s rest orientation ([0,0,0] = hand hanging / foot flat and forward; foot [-30,0,0] points the toes down). ' +
       'pole is a point the elbow/knee should aim toward. ' +
+      'For first-person animation, give a hand goal a `view` [x, y, depth] instead of a position to place it directly in the first-person picture. ' +
       'The result lists where each effector ended up and any goal that was out of reach or limited, so read it. ' + CONVENTIONS,
     schema: z.object({
       frame: frameArg, clip: clipArg, rig: rigArg,
@@ -333,7 +343,8 @@ export function buildTools(): ToolDef[] {
         rotation: vec3('Euler XYZ degrees. Y turns the body, X leans forward(+)/back(-), Z tilts sideways.').optional()
       }).optional(),
       goals: z.record(z.string(), z.object({
-        position: vec3('Effector target in scene space.'),
+        position: vec3('Effector target in scene space.').optional(),
+        view: vec3('First-person placement instead of position: [x, y, depth]. x and y are where the effector sits in the first-person picture (-1 left/bottom edge, 0 centre, +1 right/top edge) and depth is how far in front of the eye, in rig units. E.g. [0.45, -0.5, 1.6] is lower right, a comfortable held-item position.').optional(),
         rotation: vec3('End bone orientation, Euler XYZ degrees relative to its rest orientation.').optional(),
         pole: vec3('Scene-space point the elbow/knee aims at.').optional()
       })).optional().describe('IK goals keyed by chain name (e.g. right_hand, left_hand, right_foot, left_foot; see get_rig).'),
@@ -356,6 +367,17 @@ export function buildTools(): ToolDef[] {
       if (!a.hips && !a.goals && !a.bones && !a.look_at && !a.from) {
         // A bare set_pose keys the current pose: useful for holds.
       }
+      // Resolve first-person `view` placements to scene positions.
+      let goals: Record<string, { position: Vec3; rotation?: Vec3; pole?: Vec3 }> | undefined
+      if (a.goals) {
+        goals = {}
+        for (const name in a.goals) {
+          const g = a.goals[name]
+          if (g.view) goals[name] = { ...g, position: eyeUnproject(restEye(rig0), g.view[0], g.view[1], g.view[2], 16 / 9) }
+          else if (g.position) goals[name] = { ...g, position: g.position }
+          else throw new Error(`Goal "${name}" needs a position or a view.`)
+        }
+      }
       let base: Pose | undefined
       if (a.from === 'rest') base = {}
       else if (a.from) {
@@ -365,7 +387,7 @@ export function buildTools(): ToolDef[] {
       const res = mutate(ctx, `pose frame ${a.frame}`, { clipId: clip0.id, rigId: rig0.id, frames: [a.frame] }, (p) =>
         opSetPose({
           clip: getClip(p, clip0.id), rig: getRig(p, rig0.id), frame: a.frame,
-          spec: { hips: a.hips, goals: a.goals, bones: a.bones, lookAt: a.look_at, keepFeet: a.keep_feet },
+          spec: { hips: a.hips, goals, bones: a.bones, lookAt: a.look_at, keepFeet: a.keep_feet },
           base, easing: resolveEasing(a.timing as never), straight: a.straight_paths, onlyChanged: a.only_changed
         }))
       const warnings: string[] = []
@@ -621,19 +643,21 @@ export function buildTools(): ToolDef[] {
     description:
       'Render the animation and LOOK at it. Returns one image: a contact sheet with a cell per frame per view, each labelled with its frame number, over a ground grid (1 unit per square). ' +
       'Default is 8 evenly spaced frames from the front and side. Use frames="keys" to see exactly the key poses while blocking, or list specific frames to inspect a problem. ' +
-      'Views: front (camera in front of the character, so the character\'s right hand is on the image\'s left), back, side (character\'s right side; forward is to the image\'s left), left, top, three_quarter, camera (the cutscene camera). ' +
+      'Views: front (camera in front of the character, so the character\'s right hand is on the image\'s left), back, side (seen from the character\'s right; forward is to the image\'s right), left (seen from its left; forward is to the image\'s left), top (forward is up the image), three_quarter, camera (the cutscene camera), first_person (through the character\'s eyes with the head hidden: fixed at the rest head position looking straight ahead, 16:9, 70 degree field of view, the way a game camera that follows the character sees it), head_cam (same, but locked to the animated head so head motion moves the picture). ' +
+      'With a first-person view the result also lists, per frame, whether each hand and foot is inside the picture and where (x, y from -1 to 1), so you can tell when the action leaves the frame. ' +
       'onion_skin ghosts the previous and next sampled poses into each cell to show spacing; trails draws the path of the named IK chains or bones through the whole clip to check arcs. ' +
       'Always preview after blocking and again after the final change.',
     schema: z.object({
       clip: clipArg,
       frames: z.union([z.array(frameArg).min(1).max(24), z.literal('keys')]).optional().describe('Specific frames, or "keys" for the key frames.'),
       count: z.number().int().min(1).max(24).optional().describe('Number of evenly spaced frames when `frames` is omitted. Default 8.'),
-      views: z.array(z.enum(['front', 'back', 'side', 'left', 'top', 'three_quarter', 'camera'])).min(1).max(4).optional().describe('Default ["front","side"].'),
+      views: z.array(z.enum(['front', 'back', 'side', 'left', 'top', 'three_quarter', 'camera', 'first_person', 'head_cam'])).min(1).max(4).optional().describe('Default ["front","side"].'),
       onion_skin: z.boolean().optional(),
       trails: z.array(z.string()).optional().describe('IK chain or bone names to draw motion trails for, e.g. ["right_hand"].'),
-      rigs: z.array(z.string()).optional().describe('Rigs to show. Default: all.')
+      rigs: z.array(z.string()).optional().describe('Rigs to show. Default: all.'),
+      rig: rigArg.describe('Whose eyes the first-person views look through. Defaults to the active rig.')
     }),
-    chip: () => 'previewing',
+    chip: (a) => (a.views?.some((v) => v === 'first_person' || v === 'head_cam') ? 'previewing in first person' : 'previewing'),
     handler: async (a, ctx): Promise<ToolResult> => {
       const p = ctx.store.project
       const clip = getClip(p, a.clip)
@@ -656,9 +680,16 @@ export function buildTools(): ToolDef[] {
       const rigIds = a.rigs?.length ? a.rigs.map((x) => getRig(p, x).id) : p.rigs.map((x) => x.id)
       const cells = frames.length * views.length
       const cellSize = cells <= 4 ? 512 : cells <= 9 ? 448 : cells <= 16 ? 384 : cells <= 30 ? 300 : 240
-      const img = await ctx.host.renderPreview({ project: p, clipId: clip.id, rigIds, frames, views, onionSkin: !!a.onion_skin, trails: a.trails ?? [], cellSize })
+      const fpViews = views.filter((v): v is 'first_person' | 'head_cam' => v === 'first_person' || v === 'head_cam')
+      const subject = fpViews.length ? getRig(p, a.rig) : undefined
+      if (subject && !subject.head) throw new Error(`"${subject.name}" has no head bone, so it has no first-person view. Pass rig: a character rig.`)
+      const img = await ctx.host.renderPreview({ project: p, clipId: clip.id, rigIds, frames, views, onionSkin: !!a.onion_skin, trails: a.trails ?? [], cellSize, subjectRigId: subject?.id })
+      const inView = subject ? Object.fromEntries(fpViews.map((v) => {
+        const table = effectorsInView(clip, subject, frames, v, 16 / 9)
+        return [v, Object.fromEntries(Object.entries(table).map(([f, chains]) => [`f${f}`, Object.fromEntries(Object.entries(chains).map(([c, e]) => [c, e.visible ? `in view at x ${e.x}, y ${e.y}, ${e.depth} ahead` : e.depth <= 0.1 ? 'not visible (beside or behind the eye)' : 'out of frame']))]))]
+      })) : undefined
       return {
-        text: JSON.stringify({ clip: clip.name, frames, views, layout: 'cells read left to right, top to bottom; each view is its own block of rows, in the order of `views`', length_frames: clip.length }),
+        text: JSON.stringify({ clip: clip.name, frames, views, first_person_visibility: inView, layout: 'cells read left to right, top to bottom; each view is its own block of rows, in the order of `views`', length_frames: clip.length }),
         images: [img]
       }
     }
@@ -708,7 +739,7 @@ export function buildTools(): ToolDef[] {
       height: z.number().int().min(64).max(2160).optional().describe('Video height. Default 720.'),
       fps: z.number().int().min(1).max(60).optional().describe('Video frame rate. Default: the clip\'s fps.'),
       background: z.string().optional().describe('"transparent" or a hex colour like "#101014". Default: the app theme background.'),
-      camera: z.enum(['track', 'front', 'back', 'side', 'left', 'top', 'three_quarter']).optional().describe('Video camera: "track" uses the clip\'s camera keys. Default three_quarter (or track if the clip has camera keys).')
+      camera: z.enum(['track', 'front', 'back', 'side', 'left', 'top', 'three_quarter', 'first_person', 'head_cam']).optional().describe('Video camera: "track" uses the clip\'s camera keys; "first_person" and "head_cam" look through the eyes of `rig` with its head hidden. Default three_quarter (or track if the clip has camera keys).')
     }),
     chip: (a) => `exporting ${a.format}`,
     handler: async (a, ctx) => {
@@ -740,7 +771,7 @@ export function buildTools(): ToolDef[] {
       const res = await ctx.host.renderVideo({
         project: p, clipId: clip.id, format: a.format, path,
         width: a.width ?? 1280, height: a.height ?? 720, fps: a.fps ?? clip.fps,
-        background: a.background ?? 'theme', camera: a.camera ?? (clip.camera.length ? 'track' : 'three_quarter')
+        background: a.background ?? 'theme', camera: a.camera ?? (clip.camera.length ? 'track' : 'three_quarter'), rigId: getRig(p, a.rig).id
       })
       return { exported: res.path, format: a.format, frames: res.frames }
     }

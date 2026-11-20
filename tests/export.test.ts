@@ -25,7 +25,7 @@ function sampleClip(): Clip {
   opSetPose({ clip: c, rig, frame: 8, spec: { hips: { position: [0.1, -0.5, 0.2], rotation: [0, 30, 0] }, goals: { right_hand: { position: [1.3, 3.2, 0.6] } }, lookAt: [2, 4, -4] }, easing: { ease: 'cubic', dir: 'out' } })
   opSetPose({ clip: c, rig, frame: 12, spec: { hips: { position: [0, -0.3, -0.2], rotation: [0, -25, 0] }, goals: { right_hand: { position: [0.6, 3.9, -1.9] } } }, easing: { ease: 'constant', dir: 'inout' } })
   opSetPose({ clip: c, rig, frame: 18, spec: { bones: { UpperTorso: { rotation: [10, 0, 5] } } }, easing: { ease: 'elastic', dir: 'out' } })
-  opSetPose({ clip: c, rig, frame: 24, from: undefined, spec: { hips: { position: [0, -0.2, 0], rotation: [0, 0, 0] } }, base: evaluateRig(c, rig, 0) })
+  opSetPose({ clip: c, rig, frame: 24, spec: { hips: { position: [0, -0.2, 0], rotation: [0, 0, 0] } }, base: evaluateRig(c, rig, 0) })
   opAddContact(c, rig, 'left_foot', 3, 20)
   c.markers.push({ name: 'hit', frame: 12, value: 'heavy' })
   return c

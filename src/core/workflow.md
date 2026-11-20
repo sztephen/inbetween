@@ -9,7 +9,8 @@ You are animating 3D rigs in Inbetween. You do the animating yourself, the way a
 - Units are the rig's own: studs for Roblox rigs (an R15 is about 5.4 studs tall), meters for glTF rigs.
 - Rotations are Euler XYZ degrees in the joint's local frame. For a limb hanging down, +X swings it forward.
 - Frames are whole numbers starting at 0. A clip's `length` is its last frame; at 30 fps, length 30 is one second.
-- In the front view the camera faces the character, so the character's right hand is on the left of the image. In the side view, forward is to the left of the image.
+- First person: the player's eye is at the rest head position looking along -Z with a 70 degree field of view (`get_rig` reports it as `first_person.eye_world`). The head is hidden and only what is in front of the eye is seen.
+- In the front view the camera faces the character, so the character's right hand is on the left of the image. The side view looks at the character's right side, so forward is to the right of the image.
 
 ## The workflow
 
@@ -60,6 +61,17 @@ Set `loop: true` and Movement priority. Build half the cycle, then mirror it.
 ### Emotes and cutscenes
 
 Emotes are gestures with a clear start, accent and finish: hit the accent pose a little early, overshoot it, settle back, and let the head and the free hand overlap. For a wave, raise the arm first, then swing the forearm from the elbow, with the hand trailing the forearm. For cutscenes, add every rig the scene needs, animate them in the same clip, and use `set_camera` to key the camera position, target and field of view. Check framing with `preview` using the `camera` view, and change shots with `stepped` camera timing for a cut or eased timing for a move.
+
+### First-person animation
+
+First-person animations are judged from inside the character's head, so preview them with `views: ["first_person"]` (add `"side"` to keep an eye on the body). The picture is 16:9; arms hanging at the sides are not in it. Things to do differently:
+
+- Place hands in the picture, not in the world: give a hand goal a `view` of `[x, y, depth]`, where x and y run from -1 to 1 across the picture and depth is the distance in front of the eye. A held item rests around `[0.45, -0.5, 1.6]`; two-handed poses mirror that on the left. Use a `pole` below and outside the hand so the elbow stays out of frame and the forearm enters from the bottom corner.
+- Read `first_person_visibility` in the preview result. It says, per frame, whether each hand is in the picture and where. A hand that drifts out of frame mid-action is invisible to the player, however good it looks from outside.
+- Motion toward and away from the eye reads as size, not travel, so keep the important movement across the picture: swings travel side to side or corner to corner, a reload drops the hand down and out of frame and brings it back.
+- Keep it smaller and quicker than third person. Anticipation is a short pull back toward the bottom corner, the action crosses the centre in two or three frames, and the settle is a small overshoot. Big hip and spine moves do nothing for the player unless the camera is locked to the head.
+- Use `head_cam` instead when the game attaches its camera to the head: then head bob, recoil kick and landing dips are part of the animation, so keep head rotation small (a few degrees) or the view becomes nauseating.
+- An idle is a slow drift of the hands of a few hundredths of the picture, with the two hands slightly out of phase.
 
 ### Props
 

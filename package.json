@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "start": "electron-vite preview",
-    "build": "electron-vite build && vite build --config vite.launcher.config.ts",
+    "build": "electron-vite build && vite build --config vite.launcher.config.mts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:e2e": "npm run build && node scripts/e2e.mjs",
@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.11.0",
+    "@fontsource-variable/schibsted-grotesk": "^5.3.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "motion": "^14.14.0",
     "react": "^19.3.1",
