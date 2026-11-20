@@ -60,30 +60,43 @@ export class SettingsStore {
 
   // --- API key: encrypted with the OS keychain via safeStorage, never logged, never sent to the renderer.
 
-  get encryptionAvailable(): boolean {
-    return safeStorage.isEncryptionAvailable()
-  }
+  private available = false
 
-  getKey(): string | null {
-    if (this.cachedKey !== undefined) return this.cachedKey
+  /** Load keychain state. Call once after the app is ready. */
+  async init(): Promise<void> {
     try {
-      if (!existsSync(this.keyFile) || !this.encryptionAvailable) return (this.cachedKey = null)
-      this.cachedKey = safeStorage.decryptString(readFileSync(this.keyFile))
+      this.available = await safeStorage.isAsyncEncryptionAvailable()
+    } catch {
+      this.available = false
+    }
+    this.cachedKey = null
+    if (!this.available || !existsSync(this.keyFile)) return
+    try {
+      const out = await safeStorage.decryptStringAsync(readFileSync(this.keyFile))
+      this.cachedKey = out.result || null
+      if (out.shouldReEncrypt && this.cachedKey) writeFileSync(this.keyFile, await safeStorage.encryptStringAsync(this.cachedKey), { mode: 0o600 })
     } catch {
       this.cachedKey = null
     }
-    return this.cachedKey
   }
 
-  setKey(key: string | null): void {
+  get encryptionAvailable(): boolean {
+    return this.available
+  }
+
+  getKey(): string | null {
+    return this.cachedKey ?? null
+  }
+
+  async setKey(key: string | null): Promise<void> {
     const trimmed = key?.trim()
     if (!trimmed) {
       rmSync(this.keyFile, { force: true })
       this.cachedKey = null
       return
     }
-    if (!this.encryptionAvailable) throw new Error('This system has no secure credential storage available, so the key was not saved.')
-    writeFileSync(this.keyFile, safeStorage.encryptString(trimmed), { mode: 0o600 })
+    if (!this.available) throw new Error('This system has no secure credential storage available, so the key was not saved.')
+    writeFileSync(this.keyFile, await safeStorage.encryptStringAsync(trimmed), { mode: 0o600 })
     this.cachedKey = trimmed
   }
 

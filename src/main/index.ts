@@ -390,8 +390,8 @@ ipcMain.handle('settings:set', async (_e, patch: Partial<Settings>) => {
   }
   return settingsState()
 })
-ipcMain.handle('key:set', (_e, key: string | null) => {
-  settings.setKey(key)
+ipcMain.handle('key:set', async (_e, key: string | null) => {
+  await settings.setKey(key)
   return settingsState()
 })
 ipcMain.handle('models:open', async () => {
@@ -604,6 +604,7 @@ if (!app.requestSingleInstanceLock()) {
   })
   void app.whenReady().then(async () => {
     nativeTheme.themeSource = settings.settings.theme
+    await settings.init()
     buildMenu()
     const fileArg = process.argv.find((a) => /\.inbetween$/i.test(a))
     if (fileArg && existsSync(fileArg)) openProjectFile(fileArg)
