@@ -1,0 +1,346 @@
+{
+ "source": "https://github.com/fleasion/Fleasion/blob/bdb2d3fe445cb3c7813c23920a64b94488728447/src/fleasion/cache/tools/animpreview/R15RIG.rbxmx (Roblox XML model, Model 'Rig'; mesh asset ids 7430070991-7430071119 = Studio Rig Builder R15 Block Rig). Extracted by parsing the XML: Motor6D C0/C1 CoordinateFrame + Part0/Part1 refs, Part/MeshPart 'size', Humanoid HipHeight, Attachment CFrame. '-0' normalized to 0; otherwise values are the decimal strings in the file.",
+ "bodyType": "R15 Block Rig (Rig Builder, 2021+ mesh set with MeshPart head)",
+ "hipHeight": 2.0,
+ "parts": {
+  "HumanoidRootPart": {
+   "size": [
+    2.0,
+    2.0,
+    1.0
+   ]
+  },
+  "Head": {
+   "size": [
+    1.19783974,
+    1.20240021,
+    1.19790077
+   ]
+  },
+  "LeftHand": {
+   "size": [
+    1.0,
+    0.300100327,
+    1.0
+   ]
+  },
+  "RightHand": {
+   "size": [
+    1.0,
+    0.300100327,
+    1.0
+   ]
+  },
+  "LeftLowerArm": {
+   "size": [
+    1.0,
+    1.05189896,
+    1.0
+   ]
+  },
+  "RightLowerArm": {
+   "size": [
+    1.0,
+    1.05189896,
+    1.0
+   ]
+  },
+  "LeftUpperArm": {
+   "size": [
+    1.0,
+    1.16869926,
+    1.0
+   ]
+  },
+  "RightUpperArm": {
+   "size": [
+    1.0,
+    1.16869926,
+    1.0
+   ]
+  },
+  "LeftFoot": {
+   "size": [
+    1.0,
+    0.299999237,
+    1.0
+   ]
+  },
+  "LeftLowerLeg": {
+   "size": [
+    1.0,
+    1.19309998,
+    1.0
+   ]
+  },
+  "UpperTorso": {
+   "size": [
+    2.0,
+    1.60000038,
+    1.0
+   ]
+  },
+  "LeftUpperLeg": {
+   "size": [
+    1.0,
+    1.21660042,
+    0.999898911
+   ]
+  },
+  "RightFoot": {
+   "size": [
+    1.0,
+    0.299999237,
+    1.0
+   ]
+  },
+  "RightLowerLeg": {
+   "size": [
+    1.0,
+    1.19309998,
+    1.0
+   ]
+  },
+  "LowerTorso": {
+   "size": [
+    2.0,
+    0.400100708,
+    1.0
+   ]
+  },
+  "RightUpperLeg": {
+   "size": [
+    1.0,
+    1.21660042,
+    0.999898911
+   ]
+  }
+ },
+ "joints": [
+  {
+   "name": "Neck",
+   "part0": "UpperTorso",
+   "part1": "Head",
+   "c0": [
+    -5.96046448e-08,
+    0.800017118,
+    1.1920929e-07
+   ],
+   "c1": [
+    0.0,
+    -0.500000119,
+    -0.000272244215
+   ]
+  },
+  {
+   "name": "LeftWrist",
+   "part0": "LeftLowerArm",
+   "part1": "LeftHand",
+   "c0": [
+    0.000478625298,
+    -0.5009287,
+    7.64462551e-20
+   ],
+   "c1": [
+    0.000478982925,
+    0.125045404,
+    5.96046448e-08
+   ]
+  },
+  {
+   "name": "RightWrist",
+   "part0": "RightLowerArm",
+   "part1": "RightHand",
+   "c0": [
+    1.1920929e-07,
+    -0.5009287,
+    -6.86244753e-18
+   ],
+   "c1": [
+    3.57627869e-07,
+    0.125045404,
+    5.96046448e-08
+   ]
+  },
+  {
+   "name": "LeftElbow",
+   "part0": "LeftUpperArm",
+   "part1": "LeftLowerArm",
+   "c0": [
+    0.000479221344,
+    -0.334056377,
+    8.94069672e-08
+   ],
+   "c1": [
+    0.000478625298,
+    0.258688211,
+    7.64462551e-20
+   ]
+  },
+  {
+   "name": "RightElbow",
+   "part0": "RightUpperArm",
+   "part1": "RightLowerArm",
+   "c0": [
+    -5.96046448e-07,
+    -0.334165096,
+    8.94069672e-08
+   ],
+   "c1": [
+    1.1920929e-07,
+    0.258579493,
+    7.64462551e-20
+   ]
+  },
+  {
+   "name": "LeftShoulder",
+   "part0": "UpperTorso",
+   "part1": "LeftUpperArm",
+   "c0": [
+    -1.0,
+    0.56301713,
+    1.1920929e-07
+   ],
+   "c1": [
+    0.500000358,
+    0.394326687,
+    8.94069672e-08
+   ]
+  },
+  {
+   "name": "RightShoulder",
+   "part0": "UpperTorso",
+   "part1": "RightUpperArm",
+   "c0": [
+    0.99999994,
+    0.56301713,
+    1.1920929e-07
+   ],
+   "c1": [
+    -0.500000715,
+    0.394326687,
+    8.94069672e-08
+   ]
+  },
+  {
+   "name": "LeftAnkle",
+   "part0": "LeftLowerLeg",
+   "part1": "LeftFoot",
+   "c0": [
+    -1.1920929e-07,
+    -0.547157228,
+    -2.21401592e-06
+   ],
+   "c1": [
+    -1.78813934e-07,
+    0.101939693,
+    -1.7222776e-06
+   ]
+  },
+  {
+   "name": "LeftKnee",
+   "part0": "LeftUpperLeg",
+   "part1": "LeftLowerLeg",
+   "c0": [
+    8.94069672e-08,
+    -0.401102424,
+    -4.29081496e-07
+   ],
+   "c1": [
+    2.98023224e-08,
+    0.379018486,
+    -1.60860594e-07
+   ]
+  },
+  {
+   "name": "Waist",
+   "part0": "LowerTorso",
+   "part1": "UpperTorso",
+   "c0": [
+    -1.1920929e-07,
+    0.200024918,
+    7.64462551e-20
+   ],
+   "c1": [
+    -5.96046448e-08,
+    -0.799985707,
+    1.1920929e-07
+   ]
+  },
+  {
+   "name": "LeftHip",
+   "part0": "LowerTorso",
+   "part1": "LeftUpperLeg",
+   "c0": [
+    -0.500000119,
+    -0.199972257,
+    0.0
+   ],
+   "c1": [
+    5.96046448e-08,
+    0.420782208,
+    -1.63912773e-07
+   ]
+  },
+  {
+   "name": "RightAnkle",
+   "part0": "RightLowerLeg",
+   "part1": "RightFoot",
+   "c0": [
+    0.0,
+    -0.547157168,
+    7.62689815e-05
+   ],
+   "c1": [
+    0.0,
+    0.101939559,
+    7.64477954e-05
+   ]
+  },
+  {
+   "name": "RightKnee",
+   "part0": "RightUpperLeg",
+   "part1": "RightLowerLeg",
+   "c0": [
+    0.0,
+    -0.400946498,
+    -2.18767891e-05
+   ],
+   "c1": [
+    0.0,
+    0.379174292,
+    2.5553607e-05
+   ]
+  },
+  {
+   "name": "Root",
+   "part0": "HumanoidRootPart",
+   "part1": "LowerTorso",
+   "c0": [
+    0.0,
+    -1.0,
+    0.0
+   ],
+   "c1": [
+    -1.1920929e-07,
+    -0.199972257,
+    0.0
+   ]
+  },
+  {
+   "name": "RightHip",
+   "part0": "LowerTorso",
+   "part1": "RightUpperLeg",
+   "c0": [
+    0.499999881,
+    -0.199972257,
+    -1.91208565e-05
+   ],
+   "c1": [
+    0.0,
+    0.420782268,
+    -6.67300628e-05
+   ]
+  }
+ ]
+}
