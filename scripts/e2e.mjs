@@ -114,7 +114,7 @@ const json = (res) => JSON.parse(text(res).split('\n\nNOTE:')[0])
 
 async function run() {
   // ============================================================== 1. shell + MCP
-  if (want('shell') || want('mcp') || want('manual') || want('export')) {
+  if (want('shell') || want('mcp') || want('manual') || want('export') || want('rigs')) {
     const { app, page, userData, errors } = await launch()
     try {
       if (want('shell')) {
@@ -379,6 +379,40 @@ async function run() {
         }
         await client.close()
       }
+      if (want('rigs')) {
+        console.log('custom rigs, props, camera')
+        const { client } = await mcpConnect(userData)
+        // Export the R15 as GLB, then bring it back in as a glTF rig beside the original.
+        const glbPath = join(userData, 'rig.glb')
+        await client.callTool({ name: 'create_clip', arguments: { name: 'Scene', length: 30 } })
+        await client.callTool({ name: 'set_pose', arguments: { frame: 0 } })
+        await client.callTool({ name: 'export', arguments: { format: 'glb', path: glbPath } })
+        const added = json(await client.callTool({ name: 'add_rig', arguments: { type: 'file', path: glbPath, name: 'Imported', position: [5, 0, 0] } }))
+        assert(added.added.ik_chains.length === 4, `glTF rig chains not detected: ${JSON.stringify(added.added.ik_chains)}`)
+        const posed = json(await client.callTool({ name: 'set_pose', arguments: { rig: added.added.id, frame: 15, goals: { right_hand: { position: [3.6, 4.4, -1.2] } }, look_at: [0, 4, -6] } }))
+        assert(!posed.warnings, `glTF rig IK failed: ${JSON.stringify(posed.warnings)}`)
+        const door = json(await client.callTool({ name: 'add_rig', arguments: { type: 'prop', preset: 'door', position: [-5, 0, 0] } }))
+        await client.callTool({ name: 'set_pose', arguments: { rig: door.added.id, frame: 0, bones: { Door: { rotation: [0, 0, 0] } }, timing: 'heavy' } })
+        await client.callTool({ name: 'set_pose', arguments: { rig: door.added.id, frame: 20, bones: { Door: { rotation: [0, -95, 0] } }, timing: 'bouncy' } })
+        await client.callTool({ name: 'set_camera', arguments: { frame: 0, position: [0, 5, -18], target: [0, 3, 0], fov: 45 } })
+        await client.callTool({ name: 'set_camera', arguments: { frame: 30, position: [6, 4, -13], target: [0, 3, 0], fov: 38, timing: 'floaty' } })
+        const prev = await client.callTool({ name: 'preview', arguments: { frames: [0, 15, 30], views: ['camera', 'three_quarter'] } })
+        assert(!prev.isError, `scene preview failed: ${text(prev)}`)
+        writeFileSync(join(out, 'mcp-scene-preview.png'), Buffer.from(prev.content.find((c) => c.type === 'image').data, 'base64'))
+        const glb2 = join(userData, 'imported.glb')
+        const ex = await client.callTool({ name: 'export', arguments: { format: 'glb', rig: added.added.id, path: glb2 } })
+        assert(!ex.isError && statSync(glb2).size > 1000, `glTF rig export failed: ${text(ex)}`)
+        const cam = await client.callTool({ name: 'export', arguments: { format: 'mp4', path: join(userData, 'cam.mp4'), width: 640, height: 360, camera: 'track' } }, undefined, { timeout: 180000 })
+        assert(!cam.isError, `camera-track video failed: ${text(cam)}`)
+        const fpv = await client.callTool({ name: 'export', arguments: { format: 'mp4', rig: 'R15', path: join(userData, 'fp.mp4'), width: 640, height: 360, camera: 'first_person' } }, undefined, { timeout: 180000 })
+        assert(!fpv.isError, `first-person video failed: ${text(fpv)}`)
+        await sleep(400)
+        await page.keyboard.press('f')
+        await sleep(500)
+        await shot(page, '06b-scene-rigs-props-camera')
+        await client.close()
+        ok('glTF rig import with IK, prop, camera track, scene preview, camera and first-person video')
+      }
       assert(!errors.length, `renderer console errors:\n${errors.join('\n')}`)
       ok('no renderer errors')
     } finally {
@@ -415,7 +449,9 @@ async function run() {
       const results = r3.messages[r3.messages.length - 1].content
       assert(results.some((c) => c.type === 'tool_result' && c.content.some((b) => b.type === 'image')), 'preview image was not returned to the model')
       assert(r2.messages[2].content.filter((c) => c.type === 'tool_result').length === 4, 'tool results were not batched into one user message')
-      assert(mock.state.requests[0].headers['x-api-key'], 'API key header missing')
+      // This SDK version sends the API key as a bearer token.
+      const h0 = mock.state.requests[0].headers
+      assert(h0.authorization === 'Bearer mock-key' || h0['x-api-key'] === 'mock-key', 'API key was not sent with the request')
       await shot(page, '08-agent-done')
       ok('agent loop: streaming text, tool chips, live document edits, preview image, usage', `${mock.state.requests.length} requests`)
 

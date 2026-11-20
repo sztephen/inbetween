@@ -168,15 +168,16 @@ function useWiring(): void {
     }
     window.addEventListener('keydown', onKey)
 
-    // Theme follows the OS unless overridden in Settings (the main process sets nativeTheme, which drives this query).
-    const mq = window.matchMedia('(prefers-color-scheme: dark)')
-    const theme = (): void => {
-      const t = mq.matches ? 'dark' : 'light'
+    // Theme: the main process resolves the setting against the OS preference and tells us.
+    const applyTheme = (dark: boolean): void => {
+      const t = dark ? 'dark' : 'light'
       document.documentElement.dataset.theme = t
-      S().set({ resolvedTheme: t })
+      if (S().resolvedTheme !== t) S().set({ resolvedTheme: t })
     }
-    theme()
-    mq.addEventListener('change', theme)
+    applyTheme(window.matchMedia('(prefers-color-scheme: dark)').matches)
+    const unsubTheme = useStore.subscribe((s, p) => {
+      if (s.settings && s.settings.dark !== p.settings?.dark) applyTheme(s.settings.dark)
+    })
 
     // Tell the main process what the user is looking at, for the agent's context.
     const unsub = useStore.subscribe((s, p) => {
@@ -187,7 +188,7 @@ function useWiring(): void {
       offs.forEach((f) => f())
       unsub()
       window.removeEventListener('keydown', onKey)
-      mq.removeEventListener('change', theme)
+      unsubTheme()
     }
   }, [])
 }

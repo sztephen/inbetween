@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-and-build:
+    name: Test and build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            dist: dist:mac
+            artifact: dist/*.dmg
+          - name: Windows
+            os: windows-latest
+            dist: dist:win
+            artifact: dist/*.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Unit, round-trip and walk-cycle tests
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: End-to-end (app + MCP client + mocked Claude API)
+        # Needs a display and GPU; macOS and Windows runners have both.
+        run: node scripts/e2e.mjs shell mcp manual agent rigs
+      - name: Build installer
+        run: npm run ${{ matrix.dist }}
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inbetween-${{ matrix.name }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-screenshots-${{ matrix.name }}
+          path: test-results
+          if-no-files-found: ignore

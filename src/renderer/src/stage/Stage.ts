@@ -307,6 +307,7 @@ void main(){
   float fade = 1.0 - smoothstep(uRadius * 0.35, uRadius, length(vWorld.xz));
   vec3 col = mix(uGround, uLine, max(minor * 0.45, major * 0.9));
   gl_FragColor = vec4(col, fade * uAlpha);
+  #include <colorspace_fragment>
 }`
 
 /** A scene with rigs, a 1-unit ground grid and lights. Renderers and cameras are supplied by callers. */

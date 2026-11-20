@@ -1,0 +1,49 @@
+appId: app.inbetween.desktop
+productName: Inbetween
+copyright: Inbetween
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/main/**
+  - out/preload/**
+  - out/renderer/**
+  - package.json
+asar: true
+extraResources:
+  # stdio MCP launcher and Studio plugin live outside the asar so other programs can read them.
+  - from: out/launcher
+    to: launcher
+  - from: plugin
+    to: plugin
+  - from: SKILL.md
+    to: SKILL.md
+fileAssociations:
+  - ext: inbetween
+    name: Inbetween Project
+    role: Editor
+mac:
+  category: public.app-category.graphics-design
+  target:
+    - dmg
+  # ${arch} resolves per build, so each DMG carries the ffmpeg for its own architecture.
+  extraResources:
+    - from: vendor/ffmpeg/darwin-${arch}
+      to: ffmpeg
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  darkModeSupport: true
+dmg:
+  artifactName: Inbetween-${version}-mac-${arch}.${ext}
+win:
+  target:
+    - nsis
+  extraResources:
+    - from: vendor/ffmpeg/win32-${arch}
+      to: ffmpeg
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  artifactName: Inbetween-${version}-win-${arch}-setup.${ext}
+publish: null

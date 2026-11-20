@@ -226,7 +226,7 @@ function docState(e?: { source: DocState['source']; label: string; touched?: Doc
 function settingsState(): SettingsState {
   return {
     settings: settings.settings, models: settings.models(), modelsFile: settings.modelsFile,
-    hasKey: !!settings.getKey(), keyHint: settings.keyHint(), encryptionAvailable: settings.encryptionAvailable,
+    hasKey: !!settings.getKey(), keyHint: settings.keyHint(), encryptionAvailable: settings.encryptionAvailable, dark: nativeTheme.shouldUseDarkColors,
     platform: process.platform, mcp: mcpInfo(), version: app.getVersion()
   }
 }

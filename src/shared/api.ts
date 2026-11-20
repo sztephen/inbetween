@@ -83,6 +83,8 @@ export interface SettingsState {
   hasKey: boolean
   keyHint: string
   encryptionAvailable: boolean
+  /** Resolved theme after applying the setting to the OS preference. */
+  dark: boolean
   platform: NodeJS.Platform
   mcp: McpInfo
   version: string
