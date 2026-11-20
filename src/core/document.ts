@@ -1,3 +1,4 @@
+import { detectHead } from './rigSetup'
 import { createClip, emptyProject } from './clip'
 import { createR15 } from './r15'
 import type { EditSource, Project } from './types'
@@ -190,6 +191,8 @@ export function parseProject(text: string): Project {
     c.camera ??= []
   }
   p.poses ??= {}
+  // Rigs imported before head detection covered their naming get a head (and so a first-person view) now.
+  for (const r of p.rigs) if (!r.head && Array.isArray(r.bones)) r.head = detectHead(r)
   return p as Project
 }
 

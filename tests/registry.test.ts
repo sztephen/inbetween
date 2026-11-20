@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { getClip, getRig } from '@core/clip'
+import { getClip, getRig, settleNewRig } from '@core/clip'
+import type { Rig } from '@core/types'
 import { opSetBone } from '@core/ops'
 import { qFromEulerDeg } from '@core/math'
 import { makeHarness } from './helpers'
@@ -101,5 +102,98 @@ describe('tool registry', () => {
     expect(Array.isArray(check.problems)).toBe(true)
     const noCam = await h.raw('export', { format: 'mp4', background: 'transparent' })
     expect(noCam.text).toMatch(/cannot store transparency/)
+  })
+})
+
+describe('feedback the model cannot get from stills', () => {
+  it('set_pose reports weight off the feet in pose_notes, and stays quiet for a balanced pose', async () => {
+    const h = makeHarness()
+    const ok = await h.call('set_pose', { frame: 0, hips: { position: [0, -0.3, 0] } })
+    expect(ok.pose_notes).toBeUndefined()
+    const off = await h.call('set_pose', { frame: 10, hips: { position: [0, -0.2, -1] } })
+    expect(off.pose_notes.join(' ')).toMatch(/centre of mass .* forward/)
+  })
+
+  it('motion_report measures speed, stops and stepped keys', async () => {
+    const h = makeHarness()
+    await h.call('set_pose', { frame: 0, timing: 'stepped' })
+    await h.call('set_pose', { frame: 10, goals: { right_hand: { position: [1.5, 4, -1.5] } }, timing: 'stepped' })
+    await h.call('set_pose', { frame: 30 })
+    let rep = await h.call('motion_report')
+    expect(rep.notes.join(' ')).toMatch(/stepped timing/)
+    await h.call('set_timing', { easing: [{ frames: 'all', timing: 'linear' }] })
+    rep = await h.call('motion_report', { parts: ['right_hand', 'left_hand'] })
+    expect(rep.parts.right_hand.travel).toBeGreaterThan(1)
+    expect(rep.parts.right_hand.peak_speed).toBeGreaterThan(0)
+    expect(rep.parts.right_hand.stops_at).toContain(10)
+    expect(rep.parts.left_hand.travel).toBeLessThan(0.05)
+    expect(rep.segments.map((s: { frames: number }) => s.frames)).toEqual([10, 20])
+    expect(rep.notes.join(' ')).not.toMatch(/stepped timing/)
+    const bad = await h.raw('motion_report', { parts: ['third_hand'] })
+    expect(bad.isError).toBe(true)
+  })
+})
+
+describe('models: import, place, carry and reach', () => {
+  it('imports a glTF model beside the character, converted to studs, and resizes it', async () => {
+    const h = makeHarness()
+    await h.call('set_pose', { frame: 0 })
+    const glb = await h.call('export', { format: 'glb' })
+    const added = await h.call('add_rig', { type: 'file', path: glb.exported, name: 'Statue' })
+    // A file Inbetween wrote from a studs rig comes back at its real size.
+    expect(added.added.units).toBe('studs')
+    expect(added.added.size[1]).toBeGreaterThan(4)
+    expect(added.added.size[1]).toBeLessThan(5.5)
+    // Anyone else's glTF is in metres and is converted to match a studs scene.
+    const metric: Rig = { ...structuredClone(getRig(h.store.project, 'Statue')), id: 'm', units: 'meters' }
+    const notes = settleNewRig(h.store.project, metric)
+    expect(metric.units).toBe('studs')
+    expect(metric.scale).toBeCloseTo(1 / 0.28, 3)
+    expect(notes.join(' ')).toMatch(/metres to studs/)
+    // Stood clear of the R15 rather than inside it.
+    expect(added.added.position[0]).toBeGreaterThan(2)
+    const size = added.added.size[1]
+    const placed = await h.call('place_rig', { rig: 'Statue', scale: 2 * (getRig(h.store.project, 'Statue').scale ?? 1), position: [6, 0, 0] })
+    expect(placed.size[1]).toBeCloseTo(size * 2, 1)
+    expect(placed.position).toEqual([6, 0, 0])
+    const scene = await h.call('get_scene')
+    expect(scene.rigs.find((r: { name: string }) => r.name === 'Statue').scale).toBeGreaterThan(1)
+  })
+
+  it('a model attached to a hand follows it on every frame, and stays put outside the range', async () => {
+    const h = makeHarness()
+    await h.call('add_rig', { type: 'prop', preset: 'box', name: 'Box', position: [3, 0, 0] })
+    const r15 = h.store.project.rigs[0].id
+    await h.call('set_pose', { frame: 0, rig: r15 })
+    await h.call('set_pose', { frame: 20, rig: r15, goals: { right_hand: { position: [1.2, 3.6, -1.4] } } })
+    const att = await h.call('attach', { rig: 'Box', to_rig: r15, to: 'right_hand', start: 5, end: 20 })
+    expect(att.attachment.id).toBeTruthy()
+    const root = getRig(h.store.project, 'Box').root
+    for (const f of [5, 12, 20]) {
+      const hand = (await h.call('get_clip', { frame: f, rig: r15 })).pose.effectors.right_hand
+      const box = (await h.call('get_clip', { frame: f, rig: 'Box' })).pose.bones[root].world
+      // The box's centre is one unit from its origin, and the origin rides in the palm.
+      expect(Math.hypot(box[0] - hand[0], box[1] - hand[1], box[2] - hand[2])).toBeLessThan(1.05)
+    }
+    const before = (await h.call('get_clip', { frame: 2, rig: 'Box' })).pose.bones[root].world
+    expect(before[0]).toBeCloseTo(3, 1)
+    expect((await h.call('get_clip')).attachments).toHaveLength(1)
+    // No overlapping or circular attachments; removal works.
+    expect((await h.raw('attach', { rig: 'Box', to_rig: r15, to: 'left_hand', start: 10, end: 30 })).isError).toBe(true)
+    expect((await h.raw('attach', { rig: r15, to_rig: 'Box', to: root, start: 0, end: 3 })).isError).toBe(true)
+    await h.call('attach', { remove: att.attachment.id })
+    expect((await h.call('get_clip')).attachments).toBeUndefined()
+  })
+
+  it('a hand goal can reach for a part of another rig', async () => {
+    const h = makeHarness()
+    const r15 = h.store.project.rigs[0].id
+    await h.call('add_rig', { type: 'prop', parts: [{ name: 'Post', size: [0.4, 3, 0.4], position: [0, 1.5, 0] }, { name: 'Knob', parent: 'Post', size: [0.3, 0.3, 0.3], position: [0, 1.5, 0] }], name: 'Stand', position: [0.8, 0, -1.3] })
+    const knob = (await h.call('get_clip', { frame: 0, rig: 'Stand' })).pose.bones.Knob.world
+    const res = await h.call('set_pose', { frame: 0, rig: r15, goals: { right_hand: { on: { rig: 'Stand', part: 'Knob' } } } })
+    const hand = res.effectors.right_hand
+    expect(Math.hypot(hand[0] - knob[0], hand[1] - knob[1], hand[2] - knob[2])).toBeLessThan(0.1)
+    const bad = await h.raw('set_pose', { frame: 0, rig: r15, goals: { right_hand: { on: { rig: 'Stand', part: 'Nope' } } } })
+    expect(bad.text).toMatch(/not a part of Stand/)
   })
 })

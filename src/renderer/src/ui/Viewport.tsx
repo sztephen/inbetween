@@ -8,7 +8,7 @@ import { qinv, qmul, qnorm, qrot, vsub, type Quat, type Vec3 } from '@core/math'
 import { computeWorld, effectorWorld, getBone } from '@core/rig'
 import type { Pose } from '@core/types'
 import { Stage, THEMES } from '../stage/Stage'
-import { activeClip, activeRig, api, command, reducedMotion, useStore } from '../store'
+import { activeClip, activeRig, api, command, fpRig, reducedMotion, useStore } from '../store'
 
 /** Imperative handle so menus and shortcuts can act on the viewport. */
 export const viewportActions: { frameRig?: () => void } = {}
@@ -355,10 +355,10 @@ export function Viewport(): React.JSX.Element {
       stage.applyFrame(activeClip(st), st.playing ? st.frame : Math.round(st.frame), draft ?? undefined)
       stage.setCameraMarker(activeClip(st), st.frame)
       renderer.setClearColor(stage.colors.background, 1)
-      const fpRig = st.firstPerson ? activeRig(st) : undefined
-      if (fpRig?.head && st.firstPerson) {
+      const eyeRig = st.firstPerson ? fpRig(st) : undefined
+      if (eyeRig?.head && st.firstPerson) {
         const f = st.playing ? st.frame : Math.round(st.frame)
-        stage.eyeCamera(eyeCam, fpRig.id, activeClip(st), f, st.firstPerson, draft?.rigId === fpRig.id ? draft.pose : undefined)
+        stage.eyeCamera(eyeCam, eyeRig.id, activeClip(st), f, st.firstPerson, draft?.rigId === eyeRig.id ? draft.pose : undefined)
         renderer.render(stage.scene, eyeCam)
       } else renderer.render(stage.scene, camera)
     }

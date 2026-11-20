@@ -2,10 +2,11 @@ import { contactTarget, evaluateRig, isConstrainedFrame, keyIndexAt, sampleFK } 
 import { limitViolation } from './ik'
 import { qangle, qrot, qToMat3, round, vdist, vdot, vlen, vsub, xpoint, type Vec3, type Xform } from './math'
 import { computeWorld, effectorWorld, orderedBones, restWorld, rigHeight, type WorldPose } from './rig'
+import { balanceMargin, poseBalance } from './motion'
 import type { Clip, Rig } from './types'
 
-export type CheckName = 'foot_sliding' | 'joint_limits' | 'self_intersection' | 'jitter' | 'loop_mismatch' | 'ground_penetration'
-export const ALL_CHECKS: CheckName[] = ['foot_sliding', 'joint_limits', 'self_intersection', 'jitter', 'loop_mismatch', 'ground_penetration']
+export type CheckName = 'foot_sliding' | 'joint_limits' | 'self_intersection' | 'jitter' | 'loop_mismatch' | 'ground_penetration' | 'balance'
+export const ALL_CHECKS: CheckName[] = ['foot_sliding', 'joint_limits', 'self_intersection', 'jitter', 'loop_mismatch', 'ground_penetration', 'balance']
 
 export interface Problem {
   check: CheckName
@@ -305,6 +306,49 @@ export function checkGround(rig: Rig, samples: Sample[], groundY: number, tol: n
   return problems
 }
 
+// ----- balance: a held pose whose weight is not over its support -----
+export function checkBalance(clip: Clip, rig: Rig, samples: Sample[], height: number, groundY: number): Problem[] {
+  const margin = balanceMargin(rig)
+  const still = height * 0.004
+  const hits: { frame: number; amount: number; direction: string }[] = []
+  samples.forEach((s, i) => {
+    // Only poses the character holds: momentum carries it through anything it is moving through.
+    const prev = samples[i - 1], next = samples[i + 1]
+    const hips = (x: Sample): Vec3 => x.world.bone[rig.hips].p
+    if ((prev && vdist(hips(prev), hips(s)) > still) || (next && vdist(hips(next), hips(s)) > still)) return
+    // A planted hand (leaning on a wall, hanging from a ledge) is support this check cannot weigh.
+    if (clip.contacts.some((c) => c.rig === rig.id && s.frame >= c.start && s.frame <= c.end && rig.chains.find((x) => x.name === c.chain)?.kind !== 'leg')) return
+    const b = poseBalance(rig, s.world, groundY)
+    if (b && b.grounded && b.offset > margin) hits.push({ frame: s.frame, amount: b.offset, direction: b.direction })
+  })
+  const problems: Problem[] = []
+  for (const r of ranges(hits)) {
+    if (r.end - r.start < 3) continue
+    problems.push({
+      check: 'balance', severity: 'warning', rig: rig.id, frames: [r.start, r.end], subject: rig.hips,
+      amount: round(r.worst.amount),
+      message: `Held off balance: the centre of mass sits ${r.worst.amount.toFixed(2)} ${rig.units} ${r.worst.direction || 'outside'} of what the character is standing on (worst at frame ${r.worst.frame}), so it would tip over. Bring the hips back over the supporting foot, or step a foot under the weight.`
+    })
+  }
+  return problems
+}
+
+/** The checks that make sense for a single pose, for immediate feedback while posing. */
+export function checkPose(clip: Clip, rig: Rig, frame: number, groundY = 0): string[] {
+  const height = rigHeight(rig)
+  const sample: Sample = { frame, world: computeWorld(rig, evaluateRig(clip, rig, frame)) }
+  const out = [...checkSelfIntersection(rig, [sample], height * 0.03)]
+  if (rig.source !== 'prop') out.push(...checkGround(rig, [sample], groundY, height * 0.012))
+  const notes = out.map((p) => p.message.replace(/ \(worst at frame \d+\)/, ''))
+  if (rig.source !== 'prop') {
+    const b = poseBalance(rig, sample.world, groundY)
+    if (b && b.grounded && b.offset > balanceMargin(rig)) {
+      notes.push(`Weight: the centre of mass is ${b.offset.toFixed(2)} ${rig.units} ${b.direction || 'outside'} of the feet. Fine for a pose the character moves through; if it is held, it tips over.`)
+    }
+  }
+  return notes
+}
+
 export function checkClip(clip: Clip, rig: Rig, opts: CheckOptions = {}): Problem[] {
   const checks = opts.checks ?? ALL_CHECKS
   const height = rigHeight(rig)
@@ -316,5 +360,6 @@ export function checkClip(clip: Clip, rig: Rig, opts: CheckOptions = {}): Proble
   if (checks.includes('jitter')) out.push(...checkJitter(clip, rig, samples, height))
   if (checks.includes('loop_mismatch')) out.push(...checkLoop(clip, rig, height))
   if (checks.includes('ground_penetration') && rig.source !== 'prop') out.push(...checkGround(rig, samples, opts.groundY ?? 0, height * 0.012))
+  if (checks.includes('balance') && rig.source !== 'prop') out.push(...checkBalance(clip, rig, samples, height, opts.groundY ?? 0))
   return out.sort((a, b) => a.frames[0] - b.frames[0])
 }

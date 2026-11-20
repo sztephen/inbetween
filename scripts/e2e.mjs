@@ -377,6 +377,30 @@ async function run() {
           assert(sig, `${format} file has the wrong signature`)
           ok(`export ${format}`, `${Math.round(statSync(path).size / 1024)} KB`)
         }
+        // A long render can be stopped from another AI call while it runs, and leaves no partial file.
+        await client.callTool({ name: 'create_clip', arguments: { name: 'Long', length: 900 } })
+        await client.callTool({ name: 'set_pose', arguments: { frame: 0 } })
+        await client.callTool({ name: 'set_pose', arguments: { frame: 900, goals: { right_hand: { position: [1.6, 4.6, -1] } } } })
+        const longPath = join(userData, 'long.mp4')
+        const pending = client.callTool({ name: 'export', arguments: { format: 'mp4', path: longPath, width: 1920, height: 1080 } }, undefined, { timeout: 180000 })
+        await page.waitForSelector('.export-float', { timeout: 20000 })
+        await sleep(1500)
+        const status = json(await client.callTool({ name: 'cancel_render', arguments: { status_only: true } }))
+        assert(status.rendering === true, `render status: ${JSON.stringify(status)}`)
+        await shot(page, '06b-render-progress')
+        const stopped = json(await client.callTool({ name: 'cancel_render', arguments: {} }))
+        assert(stopped.cancelled === true, `cancel_render: ${JSON.stringify(stopped)}`)
+        const cancelled = await pending
+        assert(cancelled.isError && /cancel/i.test(text(cancelled)), `cancelled export did not report it: ${text(cancelled)}`)
+        assert(!existsSync(longPath), 'cancelled render left a partial file')
+        await page.waitForFunction(() => !document.querySelector('.export-float'), null, { timeout: 10000 })
+        ok('a running video render can be cancelled by the AI', stopped.was)
+        // ...and from the app's own Stop button.
+        const pending2 = client.callTool({ name: 'export', arguments: { format: 'mp4', path: longPath, width: 1920, height: 1080 } }, undefined, { timeout: 180000 })
+        await page.locator('.export-float button', { hasText: 'Stop' }).click({ timeout: 20000 })
+        const cancelled2 = await pending2
+        assert(cancelled2.isError && /cancel/i.test(text(cancelled2)) && !existsSync(longPath), `Stop button did not cancel: ${text(cancelled2)}`)
+        ok('the Stop button cancels a render')
         await client.close()
       }
       if (want('rigs')) {
@@ -392,8 +416,22 @@ async function run() {
         const posed = json(await client.callTool({ name: 'set_pose', arguments: { rig: added.added.id, frame: 15, goals: { right_hand: { position: [3.6, 4.4, -1.2] } }, look_at: [0, 4, -6] } }))
         assert(!posed.warnings, `glTF rig IK failed: ${JSON.stringify(posed.warnings)}`)
         const door = json(await client.callTool({ name: 'add_rig', arguments: { type: 'prop', preset: 'door', position: [-5, 0, 0] } }))
+        // A prop has no head, but adding one (which makes it the active rig) must not switch off first person.
+        await sleep(300)
+        assert(await page.locator('button[aria-label="First person"]').isEnabled(), 'first-person button disabled after adding a prop')
+        await page.locator('button[aria-label="First person"]').click()
+        await sleep(300)
+        assert((await page.locator('.selection-pill, [class*="pill"]').allTextContents()).join(' ').includes('First person'), 'first person did not turn on')
+        await page.keyboard.press('Escape')
         await client.callTool({ name: 'set_pose', arguments: { rig: door.added.id, frame: 0, bones: { Door: { rotation: [0, 0, 0] } }, timing: 'heavy' } })
         await client.callTool({ name: 'set_pose', arguments: { rig: door.added.id, frame: 20, bones: { Door: { rotation: [0, -95, 0] } }, timing: 'bouncy' } })
+        // A model carried in the hand follows it; a hand can reach for a part of another rig.
+        const crate = json(await client.callTool({ name: 'add_rig', arguments: { type: 'prop', preset: 'box', name: 'Crate', scale: 0.35 } }))
+        await client.callTool({ name: 'set_pose', arguments: { rig: 'R15', frame: 30, goals: { right_hand: { position: [1.4, 3.8, -1.2] } } } })
+        const att = json(await client.callTool({ name: 'attach', arguments: { rig: crate.added.id, to_rig: 'R15', to: 'right_hand', start: 0, end: 30 } }))
+        assert(att.attachment?.id && Math.abs(att.model_origin_at_end[1] - 3.8) < 0.3, `attach failed: ${JSON.stringify(att)}`)
+        const reach = json(await client.callTool({ name: 'set_pose', arguments: { rig: added.added.id, frame: 30, goals: { left_hand: { on: { rig: 'R15', part: 'left_hand' } } }, only_changed: true } }))
+        assert(reach.effectors?.left_hand, `reaching for a part failed: ${JSON.stringify(reach)}`)
         await client.callTool({ name: 'set_camera', arguments: { frame: 0, position: [0, 5, -18], target: [0, 3, 0], fov: 45 } })
         await client.callTool({ name: 'set_camera', arguments: { frame: 30, position: [6, 4, -13], target: [0, 3, 0], fov: 38, timing: 'floaty' } })
         const prev = await client.callTool({ name: 'preview', arguments: { frames: [0, 15, 30], views: ['camera', 'three_quarter'] } })
@@ -427,13 +465,16 @@ async function run() {
     const { app, page, errors } = await launch([`--mock-api=${mock.url}`])
     try {
       // Model picker: choosing a model sticks, is saved, and is the model the next request uses.
-      const picker = page.locator('.composer select')
+      const picker = page.locator('.composer select[aria-label="Model"]')
       const options = await picker.locator('option').allTextContents()
       assert(options.join('|') === 'Sonnet 5.5|Opus 5.5|Fable 5.2', `model picker options: ${options}`)
       await picker.selectOption('claude-opus-5-5')
       await sleep(300)
       assert((await picker.inputValue()) === 'claude-opus-5-5', 'model picker did not keep the chosen model')
       assert((await page.evaluate(() => window.inbetween.getSettings())).settings.model === 'claude-opus-5-5', 'chosen model was not saved')
+      // Thinking effort: medium unless changed; the choice is saved and used.
+      const effort = page.locator('.composer select[aria-label="Thinking effort"]')
+      assert((await effort.inputValue()) === 'medium', `default effort is ${await effort.inputValue()}`)
       await page.locator('.composer textarea').fill('Make the character nod')
       await page.keyboard.press('Enter')
       await page.waitForSelector('.chip', { timeout: 15000 })
@@ -462,6 +503,9 @@ async function run() {
       const h0 = mock.state.requests[0].headers
       assert(h0.authorization === 'Bearer mock-key' || h0['x-api-key'] === 'mock-key', 'API key was not sent with the request')
       await shot(page, '08-agent-done')
+      await effort.selectOption('high')
+      await sleep(300)
+      assert((await page.evaluate(() => window.inbetween.getSettings())).settings.effort === 'high', 'chosen effort was not saved')
       ok('model picker changes the model used')
       ok('agent loop: streaming text, tool chips, live document edits, preview image, usage', `${mock.state.requests.length} requests`)
 
@@ -473,6 +517,7 @@ async function run() {
       await sleep(600)
       const lastUser = mock.state.requests[mock.state.requests.length - 1].body.messages.filter((m) => m.role === 'user').pop()
       assert(JSON.stringify(lastUser).includes('deleted keys'), 'manual edit note missing from the next agent turn')
+      assert(mock.state.requests[mock.state.requests.length - 1].body.output_config?.effort === 'high', 'the effort picked in the chat was not used')
       ok('agent is told about manual edits on its next turn')
 
       mock.state.mode = 'auth'
@@ -501,7 +546,119 @@ async function run() {
     }
   }
 
+  if (want('handoff')) {
+    console.log('MCP client hands work to the built-in AI')
+    const mock = await startMock()
+    const { app, page, userData, errors } = await launch([`--mock-api=${mock.url}`])
+    try {
+      const { client } = await mcpConnect(userData)
+      const tools = (await client.listTools()).tools.map((t) => t.name)
+      assert(tools.includes('ask_inbetween_ai') && tools.includes('cancel_render'), 'hand-off tools missing over MCP')
+      const res = await client.callTool({ name: 'ask_inbetween_ai', arguments: { brief: 'Make the character nod' } }, undefined, { timeout: 60000 })
+      assert(!res.isError, `ask_inbetween_ai failed: ${text(res)}`)
+      const out = json(res)
+      assert(out.finished && /20-frame nod/.test(out.summary), `hand-off summary: ${text(res)}`)
+      const sentTools = mock.state.requests[0].body.tools.map((t) => t.name)
+      assert(!sentTools.includes('ask_inbetween_ai'), 'the built-in AI was offered the hand-off tool itself')
+      await page.waitForSelector('.msg-from', { timeout: 5000 })
+      assert(/From inbetween-e2e/.test(await page.locator('.msg.user').first().textContent()), 'handed-off brief not shown in the chat')
+      const doc = await docOf(page)
+      assert(doc.project.clips.some((c) => c.name === 'Nod'), 'the built-in AI did not edit the document')
+      await shot(page, '08b-handoff')
+      ok('MCP client hands an animation to the built-in AI and gets its summary')
+      await client.close()
+      assert(!errors.length, `renderer console errors:\n${errors.join('\n')}`)
+    } finally {
+      await app.close().catch(() => undefined)
+      mock.server.close()
+    }
+  }
+
   // ============================================================== 3. themes
+  // ============================================================== parallel animators
+  if (want('parallel')) {
+    console.log('parallel animators (mocked Claude API)')
+    const requests = []
+    const server = createServer((req, res) => {
+      let body = ''
+      req.on('data', (c) => (body += c))
+      req.on('end', () => {
+        const json = JSON.parse(body)
+        requests.push(json)
+        const system = typeof json.system === 'string' ? json.system : JSON.stringify(json.system)
+        const results = json.messages.filter((m) => m.role === 'user' && Array.isArray(m.content) && m.content.some((c) => c.type === 'tool_result')).length
+        const worker = /one of several animators/.test(system)
+        if (worker) {
+          const mine = /Yours is \\?"([^"\\]+)/.exec(system)?.[1] ?? '?'
+          if (results === 0) return setTimeout(() => sse(res, streamOf([
+            { type: 'tool_use', id: `toolu_${mine}_1`, name: 'set_pose', input: { frame: 0 } },
+            { type: 'tool_use', id: `toolu_${mine}_2`, name: 'set_pose', input: { frame: 10, bones: { Head: { rotation: [-20, 0, 0] } } } }
+          ], 'tool_use')), 600)
+          return sse(res, streamOf([{ type: 'text', text: `Finished ${mine}.` }], 'end_turn'))
+        }
+        if (results === 0) return sse(res, streamOf([{ type: 'tool_use', id: 'toolu_p', name: 'animate_in_parallel', input: { tasks: [
+          { name: 'Punch', brief: 'A heavy right-hand punch, one second.' },
+          { name: 'Walk', brief: 'A looping walk cycle.', length: 24, loop: true },
+          { name: 'Wave', brief: 'A friendly wave.' }
+        ] } }], 'tool_use'))
+        return sse(res, streamOf([{ type: 'text', text: 'All three are ready in their tabs.' }], 'end_turn'))
+      })
+    })
+    await new Promise((r) => server.listen(0, '127.0.0.1', r))
+    const { app, page, errors } = await launch([`--mock-api=http://127.0.0.1:${server.address().port}`])
+    try {
+      await page.locator('.composer textarea').fill('Animate me a punch, a walk cycle and a wave')
+      await page.keyboard.press('Enter')
+      await page.waitForSelector('.chat-tabs', { timeout: 15000 })
+      await shot(page, '13-parallel-running')
+      await page.waitForFunction(() => /All three are ready/.test(document.querySelector('.chat-scroll')?.textContent ?? ''), null, { timeout: 30000 })
+      await page.waitForFunction(() => !document.querySelector('.send.stop'), null, { timeout: 10000 })
+      const tabs = await page.locator('.chat-tabs button').allTextContents()
+      assert(tabs.join('|') === 'All|Punch|Walk|Wave', `tabs: ${tabs}`)
+      const doc = await docOf(page)
+      for (const name of ['Punch', 'Walk', 'Wave']) {
+        const clip = doc.project.clips.find((c) => c.name === name)
+        assert(clip && clip.tracks.r15?.Head?.length === 2, `${name} was not animated in its own clip`)
+      }
+      assert(doc.project.clips.find((c) => c.name === 'Walk').loop === true && doc.project.clips.find((c) => c.name === 'Walk').length === 24, 'task clip settings not applied')
+      const lead = requests.filter((r) => r.tools.some((t) => t.name === 'animate_in_parallel'))
+      const workers = requests.filter((r) => !r.tools.some((t) => t.name === 'animate_in_parallel'))
+      // Two requests per animator, plus one more for Walk: the app checks finished work itself, finds the
+      // loop seam (frame 24 was never matched to frame 0) and sends that animator back once.
+      assert(lead.length === 2 && workers.length === 7, `requests: ${lead.length} lead, ${workers.length} worker`)
+      const sentBack = workers.filter((r) => /automatic_check/.test(JSON.stringify(r.messages)))
+      assert(sentBack.length === 1 && /Walk/.test(JSON.stringify(sentBack[0].system)) && /loop_mismatch/.test(JSON.stringify(sentBack[0].messages)), 'the Walk animator was not sent its loop seam')
+      assert(workers.every((r) => !r.tools.some((t) => t.name === 'create_clip')), 'workers should not be offered create_clip')
+      assert(/Finished Punch/.test(JSON.stringify(lead[1].messages)) && /Finished Wave/.test(JSON.stringify(lead[1].messages)), 'worker summaries were not returned to the lead')
+      // Opening a tab shows that animator's conversation and puts its clip on screen.
+      await page.locator('.chat-tabs button', { hasText: 'Walk' }).click()
+      await sleep(400)
+      const text = await page.locator('.chat-scroll').textContent()
+      assert(/A looping walk cycle\./.test(text) && /Finished Walk\./.test(text) && !/Finished Punch/.test(text), `walk tab shows: ${text}`)
+      const after = await docOf(page)
+      assert(after.project.clips.find((c) => c.id === after.project.activeClipId).name === 'Walk', 'opening a tab did not switch the clip on screen')
+      await shot(page, '14-parallel-tab')
+      // A note typed in a tab goes to that animator only.
+      const before = requests.length
+      await page.locator('.composer textarea').fill('make it bouncier')
+      await page.keyboard.press('Enter')
+      await page.waitForFunction(() => !document.querySelector('.send.stop'), null, { timeout: 10000 })
+      await sleep(300)
+      const note = requests[before]
+      assert(note && /one of several animators/.test(JSON.stringify(note.system)) && /Walk/.test(JSON.stringify(note.system)) && /make it bouncier/.test(JSON.stringify(note.messages)), 'note did not go to the Walk animator')
+      // New chat clears the tabs.
+      await page.locator('.chat-tabs button', { hasText: 'All' }).click()
+      await page.locator('.composer button', { hasText: 'New chat' }).click()
+      await sleep(300)
+      assert((await page.locator('.chat-tabs').count()) === 0, 'tabs were not cleared by New chat')
+      assert(!errors.length, `renderer errors: ${errors.join('; ')}`)
+      ok('one message starts three animators in parallel, each with its own clip and tab', `${requests.length} requests`)
+    } finally {
+      await app.close().catch(() => undefined)
+      server.close()
+    }
+  }
+
   if (want('themes')) {
     console.log('themes')
     const { app, page, userData } = await launch()

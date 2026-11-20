@@ -86,7 +86,8 @@ function writeAnimation(
 }
 
 function exportGenerated(clip: Clip, rig: Rig): Uint8Array {
-  const json: Gltf = { asset: { version: '2.0', generator: 'Inbetween' }, scene: 0, scenes: [{ name: rig.name, nodes: [0] }], nodes: [], meshes: [], materials: [] }
+  // The units note lets Inbetween re-import its own stud-sized files without mistaking them for metres.
+  const json: Gltf = { asset: { version: '2.0', generator: 'Inbetween', extras: { inbetweenUnits: rig.units } } as Gltf['asset'], scene: 0, scenes: [{ name: rig.name, nodes: [0] }], nodes: [], meshes: [], materials: [] }
   const w = new BinWriter(json)
   const cube = unitCube(w)
   json.materials = [{ name: 'Body', pbrMetallicRoughness: { baseColorFactor: [0.78, 0.78, 0.8, 1], metallicFactor: 0, roughnessFactor: 0.7 } }]

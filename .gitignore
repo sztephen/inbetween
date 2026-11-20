@@ -5,3 +5,10 @@ vendor
 *.log
 .DS_Store
 test-results
+
+# Local secrets and editor state
+.env
+.env.*
+.claude/settings.local.json
+*.pem
+*.p12

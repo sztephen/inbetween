@@ -1,12 +1,12 @@
 import { z } from 'zod'
-import { contactsAt, createClip, evaluateRig, getClip, getRig, keyFrames, newId, removeKeyAt, sampleCamera } from '../clip'
+import { contactsAt, createClip, evaluateRig, firstPersonRig, getClip, getRig, keyFrames, newId, removeKeyAt, rigAtFrame, sampleCamera, settleNewRig } from '../clip'
 import { EASE_DIRS, EASE_STYLES, TIMING_PRESETS } from '../easing'
 import { exportGlb } from '../export/gltf'
 import { effectorsInView, eyeUnproject, FIRST_PERSON_FOV, restEye } from '../firstPerson'
 import { exportRbxmx } from '../export/rbxmx'
 import { importGlbRig } from '../import/gltf'
 import { importRobloxRig } from '../import/robloxRig'
-import { qFromEulerDeg, qToEulerDeg, round, vdist, vround, type Vec3 } from '../math'
+import { qFromAxisAngle, qFromEulerDeg, qinv, qmul, qnorm, qrot, qToEulerDeg, round, vdist, vround, vsub, xpoint, type Vec3 } from '../math'
 import {
   contactError, opAddContact, opCopyPose, opDeleteKeys, opHold, opMoveKeys, opSetCamera, opSetEasing, opSetPose,
   opWritePose, presetName, resolveEasing, summarizeKeys
@@ -14,9 +14,10 @@ import {
 import { mirrorPose } from '../pose'
 import { createProp, PROP_PRESETS } from '../props'
 import { createR15 } from '../r15'
-import { computeWorld, effectorWorld, restWorld, rigBounds } from '../rig'
+import { computeWorld, effectorWorld, restWorld, rigBounds, scaleRig } from '../rig'
 import type { Pose, Project, Rig } from '../types'
-import { ALL_CHECKS, checkClip } from '../validators'
+import { motionReport } from '../motion'
+import { ALL_CHECKS, checkClip, checkPose } from '../validators'
 import { defineTool, type ToolDef, type ToolResult } from './registry'
 
 const vec3 = (desc: string) => z.array(z.number()).length(3).describe(desc) as unknown as z.ZodType<Vec3>
@@ -55,6 +56,7 @@ function describePose(rig: Rig, pose: Pose): Record<string, unknown> {
     const e = t ? deg(qToEulerDeg(t.q)) : [0, 0, 0]
     const entry: Record<string, unknown> = { rotation: e }
     if (t?.p && (t.p[0] || t.p[1] || t.p[2])) entry.position = r(t.p)
+    if (rig.bones.length <= 60) entry.world = r(world.bone[b.name].p)
     bones[b.name] = entry
   }
   return { effectors, hips_world: r(world.bone[rig.hips].p), head_world: rig.head ? r(world.bone[rig.head].p) : undefined, bones }
@@ -77,7 +79,7 @@ export function buildTools(): ToolDef[] {
       return {
         project: p.name,
         active_rig: p.activeRigId, active_clip: p.activeClipId,
-        rigs: p.rigs.map((x) => ({ id: x.id, name: x.name, type: x.source, units: x.units, bones: x.bones.length, ik_chains: x.chains.map((c) => c.name), position: r(x.origin.p) })),
+        rigs: p.rigs.map((x) => ({ id: x.id, name: x.name, type: x.source, units: x.units, bones: x.bones.length, ik_chains: x.chains.map((c) => c.name), position: r(x.origin.p), scale: x.scale && x.scale !== 1 ? round(x.scale) : undefined })),
         clips: p.clips.map((c) => ({ id: c.id, name: c.name, length: c.length, fps: c.fps, loop: c.loop })),
         saved_poses: Object.fromEntries(Object.entries(p.poses).map(([rid, m]) => [rid, Object.keys(m)]))
       }
@@ -136,7 +138,9 @@ export function buildTools(): ToolDef[] {
     description:
       'Add a character or prop to the scene. type "r15" adds a Roblox R15 character; "prop" adds a simple object rig from a preset (' +
       Object.entries(PROP_PRESETS).map(([k, v]) => `${k}: ${v.description}`).join(' ') +
-      ') or from custom `parts` (boxes joined by pivots, for doors, machines, vehicles); "file" imports a .glb/.gltf rig or a Roblox rig JSON exported by the Inbetween Studio plugin. ' +
+      ') or from custom `parts` (boxes joined by pivots, for doors, machines, vehicles); "file" imports the person\'s own model: a .glb/.gltf file (a rigged character, or any object such as a sword, chair or vehicle; every node of an unrigged model becomes a part you can animate) or a Roblox rig JSON exported by the Inbetween Studio plugin. ' +
+      'An imported model keeps its real mesh in the viewport and previews. Without `position` it is stood beside the rigs already in the scene; a metre-sized glTF model is converted to studs when the scene is in studs, unless you give `scale`. ' +
+      'Models are animated like any other rig (set_pose `bones`, keyed in the same clip as the characters), moved or resized with place_rig, and carried by a character with attach. ' +
       'The new rig becomes active. ' + CONVENTIONS,
     schema: z.object({
       type: z.enum(['r15', 'prop', 'file']),
@@ -152,7 +156,9 @@ export function buildTools(): ToolDef[] {
         translatable: z.boolean().optional()
       })).optional().describe('Custom prop parts (type "prop" without a preset). Exactly one part must have no parent.'),
       path: z.string().optional().describe('Absolute file path (type "file").'),
-      position: vec3('Where to place the rig in the scene.').optional()
+      position: vec3('Where to place the rig in the scene.').optional(),
+      rotation: vec3('Turn the whole rig, Euler XYZ degrees ([0,90,0] turns it a quarter turn about the vertical).').optional(),
+      scale: z.number().positive().max(1000).optional().describe('Uniform size factor, e.g. 0.5 for half size. Default 1 (after the automatic metres-to-studs conversion for glTF files in a studs scene).')
     }),
     chip: (a) => `adding ${a.name ?? a.preset ?? a.type}`,
     handler: async (a, ctx) => {
@@ -173,7 +179,10 @@ export function buildTools(): ToolDef[] {
           ? importGlbRig(bytes, id, a.name, a.path)
           : importRobloxRig(JSON.parse(new TextDecoder().decode(bytes)), id, a.name)
       }
+      if (a.scale) scaleRig(rig, a.scale)
+      if (a.rotation) rig.origin.q = qnorm(qmul(qFromEulerDeg(a.rotation), rig.origin.q))
       if (a.position) rig.origin.p = [...a.position] as Vec3
+      const notes = settleNewRig(ctx.store.project, rig, { scaled: a.scale !== undefined || a.type !== 'file', placed: !!a.position })
       mutate(ctx, `add rig ${rig.name}`, { rigId: rig.id }, (p) => {
         let n = rig.name, i = 2
         while (p.rigs.some((x) => x.name === n)) n = `${rig.name} ${i++}`
@@ -181,7 +190,12 @@ export function buildTools(): ToolDef[] {
         p.rigs.push(rig)
         p.activeRigId = rig.id
       })
-      return { added: { id: rig.id, name: rig.name, bones: rig.bones.map((b) => b.name), ik_chains: rig.chains.map((c) => c.name) }, note: 'Call get_rig to see rest positions and limits before posing.' }
+      const b = rigBounds(rig, restWorld(rig))
+      return {
+        added: { id: rig.id, name: rig.name, units: rig.units, bones: rig.bones.map((x) => x.name), ik_chains: rig.chains.map((c) => c.name), position: r(rig.origin.p), size: r(vsub(b.max, b.min)) },
+        notes: notes.length ? notes : undefined,
+        note: 'Call get_rig to see rest positions and limits before posing. Check the size against the other rigs with a preview; resize or move it with place_rig.'
+      }
     }
   })
 
@@ -198,11 +212,112 @@ export function buildTools(): ToolDef[] {
           delete c.tracks[rig.id]
           delete c.ikTracks[rig.id]
           c.contacts = c.contacts.filter((x) => x.rig !== rig.id)
+          if (c.attachments) c.attachments = c.attachments.filter((x) => x.rig !== rig.id && x.toRig !== rig.id)
         }
         delete p.poses[rig.id]
         if (p.activeRigId === rig.id) p.activeRigId = p.rigs[0]?.id ?? null
       })
       return `Removed ${rig.name}.`
+    }
+  })
+
+  add({
+    name: 'place_rig',
+    description:
+      'Move, turn or resize a whole rig in the scene: where a prop or imported model stands, which way a character faces, how big a model is. ' +
+      'This is the rig\'s placement for every clip, not animation: to move a model during a clip, key its root part with set_pose `bones` (position is an offset from this placement), or carry it with attach. ' +
+      'position is where the rig\'s own origin goes (for characters, the point on the ground under them). rotation is absolute, Euler XYZ degrees, [0,0,0] being the way it was imported. scale is the absolute size factor relative to the file. ' + CONVENTIONS,
+    schema: z.object({
+      rig: z.string().describe('Rig id or name.'),
+      position: vec3('New position of the rig origin in scene space.').optional(),
+      rotation: vec3('Absolute orientation, Euler XYZ degrees. [0,180,0] turns it to face the other way.').optional(),
+      scale: z.number().positive().max(1000).optional().describe('Absolute size factor: 1 is the size it was imported at, 2 is twice that.')
+    }),
+    chip: (a) => `placing ${a.rig}`,
+    handler: (a, ctx) => {
+      const rig0 = getRig(ctx.store.project, a.rig)
+      if (!a.position && !a.rotation && a.scale === undefined) throw new Error('Give a position, rotation or scale.')
+      return mutate(ctx, `place ${rig0.name}`, { rigId: rig0.id }, (p) => {
+        const rig = getRig(p, rig0.id)
+        // Imported glTF models are turned half a turn so they face -Z like everything else; that is their [0,0,0].
+        const base = rig.source === 'gltf' ? qFromAxisAngle([0, 1, 0], Math.PI) : ([0, 0, 0, 1] as [number, number, number, number])
+        if (a.scale !== undefined) {
+          // Clips keep their keys; positions keyed on this rig were in the old size.
+          scaleRig(rig, a.scale / (rig.scale ?? 1))
+        }
+        rig.origin = { p: a.position ? ([...a.position] as Vec3) : rig.origin.p, q: a.rotation ? qnorm(qmul(qFromEulerDeg(a.rotation), base)) : rig.origin.q }
+        const b = rigBounds(rig, restWorld(rig))
+        return { rig: rig.name, position: r(rig.origin.p), scale: round(rig.scale ?? 1), size: r(vsub(b.max, b.min)), bounds_min: r(b.min), bounds_max: r(b.max) }
+      })
+    }
+  })
+
+  add({
+    name: 'attach',
+    description:
+      'Let a character carry a model: attach one rig (a sword, a cup, a hat, a box) to a bone or IK chain of another for a frame range, so it follows that hand or head exactly on every frame, however the character moves. ' +
+      'Give `to` as an IK chain (right_hand puts the model in the palm) or a bone name. By default the model\'s origin snaps to that point and it keeps the orientation it has at `start`; ' +
+      'use `position` and `rotation` to adjust the grip (both in the bone\'s own frame), or keep_position=true to hold it exactly where it already is relative to the hand (for picking something up from where it lies). ' +
+      'The model\'s own keys still play on top, so its parts can move while carried. Outside the range it sits at its own placement and keys: to put something down, end the attachment on that frame and key or place the model where it lands (the result reports that spot). ' +
+      'Preview to check the grip. Pass remove (an attachment id from get_clip) to delete one. Attachments show in the viewport, previews and video; exports of a single rig do not include them (in Roblox, weld the tool to the hand).',
+    schema: z.object({
+      rig: z.string().optional().describe('The model to carry (rig id or name).'),
+      to_rig: z.string().optional().describe('The rig that carries it. Defaults to the active rig.'),
+      to: z.string().optional().describe('IK chain or bone on the carrier, e.g. right_hand or Head.'),
+      start: frameArg.optional(), end: frameArg.optional(),
+      position: vec3('Model origin relative to the attach point, in the bone frame.').optional(),
+      rotation: vec3('Model orientation relative to the bone, Euler XYZ degrees.').optional(),
+      keep_position: z.boolean().optional().describe('Keep the model where it is at `start` instead of snapping it to the attach point.'),
+      remove: z.string().optional().describe('Attachment id to remove.'),
+      clip: clipArg
+    }),
+    chip: (a) => (a.remove ? 'removing attachment' : `attaching ${a.rig ?? 'model'} to ${a.to?.replace('_', ' ') ?? 'bone'}`),
+    handler: (a, ctx) => {
+      const p0 = ctx.store.project
+      const clip0 = getClip(p0, a.clip)
+      if (a.remove) {
+        if (!clip0.attachments?.some((x) => x.id === a.remove)) throw new Error(`No attachment with id "${a.remove}". Attachments: ${(clip0.attachments ?? []).map((x) => `${x.id} (${x.rig} on ${x.toBone} ${x.start}-${x.end})`).join(', ') || '(none)'}`)
+        mutate(ctx, 'remove attachment', { clipId: clip0.id }, (p) => {
+          const c = getClip(p, clip0.id)
+          c.attachments = c.attachments!.filter((x) => x.id !== a.remove)
+        })
+        return `Removed attachment ${a.remove}.`
+      }
+      if (!a.rig || !a.to || a.start === undefined || a.end === undefined) throw new Error('attach needs rig, to, start and end.')
+      if (a.end < a.start) throw new Error(`Attachment end (${a.end}) is before start (${a.start}).`)
+      const model = getRig(p0, a.rig)
+      const carrier = getRig(p0, a.to_rig)
+      if (model.id === carrier.id) throw new Error('A rig cannot be attached to itself. Give `rig` (the model) and `to_rig` (the character).')
+      if (clip0.attachments?.some((x) => x.rig === carrier.id && x.toRig === model.id)) throw new Error(`${carrier.name} is already attached to ${model.name}; they cannot carry each other.`)
+      const overlap = clip0.attachments?.find((x) => x.rig === model.id && x.start <= a.end! && x.end >= a.start!)
+      if (overlap) throw new Error(`${model.name} is already attached over frames ${overlap.start}-${overlap.end} (id ${overlap.id}). Remove it first or choose a range that does not overlap.`)
+      const chain = carrier.chains.find((c) => c.name === a.to)
+      const boneName = chain ? chain.bones[2] : a.to
+      if (!carrier.bones.some((b) => b.name === boneName)) throw new Error(`"${a.to}" is not an IK chain or bone of ${carrier.name}. Chains: ${carrier.chains.map((c) => c.name).join(', ') || '(none)'}. Bones: ${carrier.bones.map((b) => b.name).join(', ')}`)
+      return mutate(ctx, `attach ${model.name} to ${a.to}`, { clipId: clip0.id, rigId: model.id }, (p) => {
+        const clip = getClip(p, clip0.id)
+        const boneAt = (f: number) => {
+          const c = rigAtFrame(p.rigs, clip, getRig(p, carrier.id), f)
+          return computeWorld(c, evaluateRig(clip, c, f)).bone[boneName]
+        }
+        const bone = boneAt(a.start!)
+        const now = rigAtFrame(p.rigs, clip, getRig(p, model.id), a.start!).origin
+        const inv = qinv(bone.q)
+        const offset = {
+          p: a.position ? ([...a.position] as Vec3) : a.keep_position ? qrot(inv, vsub(now.p, bone.p)) : chain ? ([...chain.tip] as Vec3) : ([0, 0, 0] as Vec3),
+          q: a.rotation ? qFromEulerDeg(a.rotation) : qnorm(qmul(inv, now.q))
+        }
+        const att = { id: newId('attach'), rig: model.id, toRig: carrier.id, toBone: boneName, start: a.start!, end: a.end!, offset }
+        ;(clip.attachments ??= []).push(att)
+        clip.attachments.sort((x, y) => x.start - y.start)
+        if (a.end! > clip.length) clip.length = a.end!
+        const endBone = boneAt(a.end!)
+        return {
+          attachment: { id: att.id, rig: model.name, to: `${carrier.name}.${boneName}`, start: att.start, end: att.end, offset_position: r(offset.p), offset_rotation: deg(qToEulerDeg(offset.q)) },
+          model_origin_at_start: r(xpoint(bone, offset.p)), model_origin_at_end: r(xpoint(endBone, offset.p)),
+          note: 'Preview a few frames of the range to check the grip and adjust position/rotation (remove, then attach again).'
+        }
+      })
     }
   })
 
@@ -283,7 +398,7 @@ export function buildTools(): ToolDef[] {
     name: 'get_clip',
     description:
       'Read a clip: settings, which frames have keys (per rig), easing on each key frame, contacts, markers and camera keys. ' +
-      'Pass `frame` to also get the evaluated pose at that frame: effector world positions and every bone\'s local rotation. ' + CONVENTIONS,
+      'Pass `frame` to also get the evaluated pose at that frame: effector world positions, and every bone\'s local rotation and world position (use it to find where a model\'s part is before reaching for it). ' + CONVENTIONS,
     schema: z.object({ clip: clipArg, frame: frameArg.optional().describe('Also return the full pose at this frame.'), rig: rigArg }),
     chip: (a) => (a.frame !== undefined ? `reading frame ${a.frame}` : 'reading clip'),
     handler: (a, ctx) => {
@@ -312,11 +427,12 @@ export function buildTools(): ToolDef[] {
           }
         }),
         contacts: clip.contacts.map((c) => ({ id: c.id, rig: c.rig, chain: c.chain, start: c.start, end: c.end, position: r(c.position), slide: c.slide ? r(c.slide) : undefined })),
+        attachments: clip.attachments?.length ? clip.attachments.map((x) => ({ id: x.id, rig: x.rig, to_rig: x.toRig, to_bone: x.toBone, start: x.start, end: x.end })) : undefined,
         markers: clip.markers,
         camera_keys: clip.camera.map((k) => ({ frame: k.frame, position: r(k.position), target: r(k.target), fov: k.fov }))
       }
       if (a.frame !== undefined) {
-        const rig = getRig(p, a.rig)
+        const rig = rigAtFrame(p.rigs, clip, getRig(p, a.rig), a.frame)
         out.pose = { frame: a.frame, rig: rig.id, ...describePose(rig, evaluateRig(clip, rig, a.frame)), active_contacts: contactsAt(clip, rig.id, a.frame).map((c) => c.chain) }
       }
       return out
@@ -335,7 +451,8 @@ export function buildTools(): ToolDef[] {
       'Goal rotation is relative to the end bone\'s rest orientation ([0,0,0] = hand hanging / foot flat and forward; foot [-30,0,0] points the toes down). ' +
       'pole is a point the elbow/knee should aim toward. ' +
       'For first-person animation, give a hand goal a `view` [x, y, depth] instead of a position to place it directly in the first-person picture. ' +
-      'The result lists where each effector ended up and any goal that was out of reach or limited, so read it. ' + CONVENTIONS,
+      'To touch or hold part of a prop, an imported model or another character, give the goal `on: {rig, part}` instead of a position. ' +
+      'The result lists where each effector ended up, any goal that was out of reach or limited, and `pose_notes` when this pose puts a part through the ground or through another part, or leaves the weight off the feet, so read it. ' + CONVENTIONS,
     schema: z.object({
       frame: frameArg, clip: clipArg, rig: rigArg,
       hips: z.object({
@@ -345,6 +462,11 @@ export function buildTools(): ToolDef[] {
       goals: z.record(z.string(), z.object({
         position: vec3('Effector target in scene space.').optional(),
         view: vec3('First-person placement instead of position: [x, y, depth]. x and y are where the effector sits in the first-person picture (-1 left/bottom edge, 0 centre, +1 right/top edge) and depth is how far in front of the eye, in rig units. E.g. [0.45, -0.5, 1.6] is lower right, a comfortable held-item position.').optional(),
+        on: z.object({
+          rig: z.string().describe('The model or character to reach for (rig id or name).'),
+          part: z.string().describe('Its bone/part or IK chain name, e.g. "Handle".'),
+          offset: vec3('Offset from the part\'s centre, in the part\'s own frame.').optional()
+        }).optional().describe('Reach for a part of another rig instead of giving a position: the goal is wherever that part is at this frame (pose the model on this frame first). Use it on every key where the hand should be on the handle, lever or other character.'),
         rotation: vec3('End bone orientation, Euler XYZ degrees relative to its rest orientation.').optional(),
         pole: vec3('Scene-space point the elbow/knee aims at.').optional()
       })).optional().describe('IK goals keyed by chain name (e.g. right_hand, left_hand, right_foot, left_foot; see get_rig).'),
@@ -374,8 +496,17 @@ export function buildTools(): ToolDef[] {
         for (const name in a.goals) {
           const g = a.goals[name]
           if (g.view) goals[name] = { ...g, position: eyeUnproject(restEye(rig0), g.view[0], g.view[1], g.view[2], 16 / 9) }
-          else if (g.position) goals[name] = { ...g, position: g.position }
-          else throw new Error(`Goal "${name}" needs a position or a view.`)
+          else if (g.on) {
+            const target = rigAtFrame(p0.rigs, clip0, getRig(p0, g.on.rig), a.frame)
+            const world = computeWorld(target, evaluateRig(clip0, target, a.frame))
+            const chain = target.chains.find((c) => c.name === g.on!.part)
+            const frame = world.bone[chain ? chain.bones[2] : g.on.part]
+            if (!frame) throw new Error(`"${g.on.part}" is not a part of ${target.name}. Parts: ${target.bones.map((b) => b.name).join(', ')}`)
+            const base: Vec3 = chain ? (chain.tip as Vec3) : [0, 0, 0]
+            const o = g.on.offset ?? [0, 0, 0]
+            goals[name] = { ...g, position: xpoint(frame, [base[0] + o[0], base[1] + o[1], base[2] + o[2]]) }
+          } else if (g.position) goals[name] = { ...g, position: g.position }
+          else throw new Error(`Goal "${name}" needs a position, a view, or an \`on\` part.`)
         }
       }
       let base: Pose | undefined
@@ -386,7 +517,8 @@ export function buildTools(): ToolDef[] {
       }
       const res = mutate(ctx, `pose frame ${a.frame}`, { clipId: clip0.id, rigId: rig0.id, frames: [a.frame] }, (p) =>
         opSetPose({
-          clip: getClip(p, clip0.id), rig: getRig(p, rig0.id), frame: a.frame,
+          // A carried model is posed where it is being carried.
+          clip: getClip(p, clip0.id), rig: rigAtFrame(p.rigs, getClip(p, clip0.id), getRig(p, rig0.id), a.frame), frame: a.frame,
           spec: { hips: a.hips, goals, bones: a.bones, lookAt: a.look_at, keepFeet: a.keep_feet },
           base, easing: resolveEasing(a.timing as never), straight: a.straight_paths, onlyChanged: a.only_changed
         }))
@@ -398,7 +530,11 @@ export function buildTools(): ToolDef[] {
         frame: a.frame, keyed_bones: res.written.length,
         effectors: Object.fromEntries(Object.entries(res.effectors).map(([k, v]) => [k, r(v)])),
         feet_kept_planted: res.keptFeet.length ? res.keptFeet : undefined,
-        warnings: warnings.length ? warnings : undefined
+        warnings: warnings.length ? warnings : undefined,
+        pose_notes: (() => {
+          const notes = checkPose(getClip(ctx.store.project, clip0.id), getRig(ctx.store.project, rig0.id), a.frame)
+          return notes.length ? notes : undefined
+        })()
       }
     }
   })
@@ -681,7 +817,7 @@ export function buildTools(): ToolDef[] {
       const cells = frames.length * views.length
       const cellSize = cells <= 4 ? 512 : cells <= 9 ? 448 : cells <= 16 ? 384 : cells <= 30 ? 300 : 240
       const fpViews = views.filter((v): v is 'first_person' | 'head_cam' => v === 'first_person' || v === 'head_cam')
-      const subject = fpViews.length ? getRig(p, a.rig) : undefined
+      const subject = fpViews.length ? (a.rig ? getRig(p, a.rig) : firstPersonRig(p) ?? getRig(p)) : undefined
       if (subject && !subject.head) throw new Error(`"${subject.name}" has no head bone, so it has no first-person view. Pass rig: a character rig.`)
       const img = await ctx.host.renderPreview({ project: p, clipId: clip.id, rigIds, frames, views, onionSkin: !!a.onion_skin, trails: a.trails ?? [], cellSize, subjectRigId: subject?.id })
       const inView = subject ? Object.fromEntries(fpViews.map((v) => {
@@ -701,7 +837,8 @@ export function buildTools(): ToolDef[] {
       'Run the automatic validators over every frame of a clip and return the problems with frame numbers. Checks: ' +
       'foot_sliding (a planted foot/hand drifting off its contact), joint_limits (a joint bent past its limits, e.g. a hyperextended elbow), ' +
       'self_intersection (body parts passing through each other), jitter (single-frame velocity spikes or frame-to-frame reversals), ' +
-      'loop_mismatch (first and last frame differ on a looping clip), ground_penetration (feet or other parts below y=0). ' +
+      'loop_mismatch (first and last frame differ on a looping clip), ground_penetration (feet or other parts below y=0), ' +
+      'balance (a held pose whose centre of mass is not over the feet, so the character would fall over). ' +
       'Fix what it reports, then run it again. An empty list means the clip is mechanically clean; it does not judge whether the motion looks good, so still preview.',
     schema: z.object({
       clip: clipArg, rig: z.string().optional().describe('Rig id or name. Default: every rig.'),
@@ -719,6 +856,23 @@ export function buildTools(): ToolDef[] {
         truncated: problems.length > 60 ? `${problems.length - 60} more not shown` : undefined
       }
     }
+  })
+
+  add({
+    name: 'motion_report',
+    description:
+      'Measure the timing of a clip in numbers, which still frames cannot show. For the hips, head, hands and feet (or the `parts` you name) it returns the distance travelled, ' +
+      'the peak speed and the frame it happens on, the frames each part comes to rest on, and a speed curve through the clip; ' +
+      'plus the stretches where nothing moves (holds), the spacing of each key-to-key move, and notes on common timing faults ' +
+      '(everything stopping on the same frame, keys left on stepped timing). ' +
+      'Use it after replacing stepped timing to confirm the rhythm is what you intended: a strike should show a sharp speed peak over 2 or 3 frames, an ease should ramp, ' +
+      'and overlapping parts should stop a few frames apart. Read-only.',
+    schema: z.object({
+      clip: clipArg, rig: rigArg,
+      parts: z.array(z.string()).optional().describe('IK chain or bone names to measure. Default: hips, head and every IK chain.')
+    }),
+    chip: () => 'measuring timing',
+    handler: (a, ctx) => motionReport(getClip(ctx.store.project, a.clip), getRig(ctx.store.project, a.rig), a.parts)
   })
 
   // ------------------------------------------------------------------ export / history
@@ -771,9 +925,27 @@ export function buildTools(): ToolDef[] {
       const res = await ctx.host.renderVideo({
         project: p, clipId: clip.id, format: a.format, path,
         width: a.width ?? 1280, height: a.height ?? 720, fps: a.fps ?? clip.fps,
-        background: a.background ?? 'theme', camera: a.camera ?? (clip.camera.length ? 'track' : 'three_quarter'), rigId: getRig(p, a.rig).id
+        background: a.background ?? 'theme', camera: a.camera ?? (clip.camera.length ? 'track' : 'three_quarter'),
+        rigId: (a.camera === 'first_person' || a.camera === 'head_cam') && !a.rig ? (firstPersonRig(p) ?? getRig(p)).id : getRig(p, a.rig).id,
+        source: ctx.source
       })
       return { exported: res.path, format: a.format, frames: res.frames }
+    }
+  })
+
+  add({
+    name: 'cancel_render',
+    description:
+      'Stop the video render (mp4, gif or webm export) that is in progress, whoever started it, and delete its partial file. ' +
+      'Runs immediately, even while the render is still going. Pass status_only=true to just report whether a render is running and how far along it is.',
+    schema: z.object({ status_only: z.boolean().optional() }),
+    chip: (a) => (a.status_only ? 'checking the render' : 'stopping the render'),
+    concurrent: true,
+    handler: (a, ctx) => {
+      const status = ctx.host.renderStatus?.() ?? null
+      if (a.status_only) return status ? { rendering: true, label: status.label, progress: Math.round(status.progress * 100) + '%', path: status.path } : { rendering: false }
+      const stopped = ctx.host.cancelRender?.() ?? null
+      return stopped ? { cancelled: true, was: `${stopped.label}, ${Math.round(stopped.progress * 100)}%` } : { cancelled: false, note: 'No render was in progress.' }
     }
   })
 

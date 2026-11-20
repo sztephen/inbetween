@@ -46,6 +46,8 @@ function reduceAgent(messages: ChatMessage[], e: AgentEvent): ChatMessage[] {
         ...m, streaming: false,
         parts: m.parts.map((p) => (p.kind === 'tool' && p.tool.status === 'running' ? { kind: 'tool' as const, tool: { ...p.tool, status: 'error' as const, summary: 'stopped' } } : p))
       }))
+    case 'user_message':
+      return [...messages, { id: `u${Date.now()}`, role: 'user', text: e.text, from: e.from, parts: [] }]
     case 'reset':
       return []
     default:
@@ -65,13 +67,30 @@ function useWiring(): void {
       const patch: Parameters<typeof s.set>[0] = { doc }
       if (clip && s.frame > clip.length) patch.frame = clip.length
       // Follow the AI: jump to the frame it just posed so the change is visible as it lands.
-      if ((doc.source === 'agent' || doc.source === 'mcp') && doc.touched?.frames?.length && !s.playing) patch.frame = doc.touched.frames[doc.touched.frames.length - 1]
+      // (Only for the clip on screen: parallel animators work in other clips at the same time.)
+      const onScreen = !doc.touched?.clipId || doc.touched.clipId === doc.project.activeClipId
+      if ((doc.source === 'agent' || doc.source === 'mcp') && doc.touched?.frames?.length && !s.playing && onScreen) patch.frame = doc.touched.frames[doc.touched.frames.length - 1]
       if (doc.label === 'load') Object.assign(patch, { frame: 0, playing: false, selectedBone: null, selectedChain: null, selectedKeys: [] })
       s.set(patch)
     }))
     offs.push(api.onSettings((settings) => S().set({ settings })))
     offs.push(api.onAgent((e) => {
       const s = S()
+      if (e.type === 'spawn') {
+        const brief: ChatMessage = { id: `b${e.agent}`, role: 'user', text: e.brief, parts: [] }
+        s.set({ threads: [...s.threads, { id: e.agent, name: e.name, clipId: e.clipId, messages: [brief], busy: true }] })
+        return
+      }
+      if (e.agent) {
+        s.set({ threads: s.threads.map((t) => (t.id !== e.agent ? t : {
+          ...t, busy: e.type === 'turn_start' ? true : e.type === 'turn_end' ? false : t.busy,
+          messages: e.type === 'turn_start' ? t.messages : reduceAgent(t.messages, e)
+        })) })
+        return
+      }
+      if (e.type === 'reset') s.set({ threads: [], chatTab: 'main' })
+      // Work handed over from an MCP client shows up in the chat, opened on the lead conversation.
+      if (e.type === 'user_message') s.set({ chatOpen: true, chatTab: 'main' })
       if (e.type === 'turn_start') s.set({ agentBusy: true })
       else if (e.type === 'turn_end') s.set({ agentBusy: false, messages: reduceAgent(s.messages, e) })
       else s.set({ messages: reduceAgent(s.messages, e) })
@@ -145,7 +164,18 @@ function useWiring(): void {
           break
       }
     }
-    offs.push(api.onMenu(act))
+    // Single-key shortcuts must never fire from the menu while the person is typing.
+    const bareKeys = new Set(['playPause', 'prevFrame', 'nextFrame', 'toggleLoop', 'keyPose', 'frame', 'firstPerson'])
+    let typedAt = -1e9
+    const onTyping = (e: KeyboardEvent): void => {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement | null)?.tagName ?? '')) typedAt = performance.now()
+    }
+    window.addEventListener('keydown', onTyping, true)
+    offs.push(() => window.removeEventListener('keydown', onTyping, true))
+    offs.push(api.onMenu((action) => {
+      if (bareKeys.has(action) && performance.now() - typedAt < 400) return
+      act(action)
+    }))
 
     const onKey = (e: KeyboardEvent): void => {
       const tag = (e.target as HTMLElement | null)?.tagName ?? ''
@@ -222,7 +252,10 @@ export function App(): React.JSX.Element {
         <AnimatePresence>
           {progress && sheet !== 'export' && (
             <motion.div key="exp" className="export-float panel" initial={{ opacity: 0, y: -12, x: '-50%' }} animate={{ opacity: 1, y: 0, x: '-50%' }} exit={{ opacity: 0, y: -8, x: '-50%' }} transition={spring}>
-              <span>{progress.label}, {Math.round(progress.progress * 100)}%</span>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                <span>{progress.label}, {Math.round(progress.progress * 100)}%</span>
+                <button className="quiet" title="Stop rendering" onClick={() => void api.cancelExport()}>Stop</button>
+              </div>
               <div className="progress"><motion.i animate={{ scaleX: Math.max(0.02, progress.progress) }} transition={{ type: 'spring', stiffness: 200, damping: 30 }} /></div>
             </motion.div>
           )}

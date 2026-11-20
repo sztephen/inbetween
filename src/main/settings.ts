@@ -30,11 +30,16 @@ export class SettingsStore {
       model: saved.model ?? DEFAULT_MODELS[0].id,
       mcpPort: saved.mcpPort ?? DEFAULT_PORT,
       exportDir: saved.exportDir ?? join(app.getPath('documents'), 'Inbetween', 'exports'),
-      chatOpen: saved.chatOpen ?? true
+      chatOpen: saved.chatOpen ?? true,
+      effort: saved.effort
     }
-    if (!existsSync(this.modelsFile)) {
+    // Write the models file on first run. One earlier build briefly rewrote it with every model at high
+    // effort; put that exact list back to the defaults. A file the person has edited is left alone.
+    const existing = readJson<{ models?: ModelOption[] }>(this.modelsFile)
+    const untouched = !!existing && JSON.stringify(existing.models) === JSON.stringify(DEFAULT_MODELS.map((m) => ({ ...m, effort: 'high' })))
+    if (!existsSync(this.modelsFile) || untouched) {
       writeFileSync(this.modelsFile, JSON.stringify({
-        _help: 'Models shown in the chat model picker. Add entries as {"id": "<Claude API model id>", "label": "<name>"}. Optional: "effort" (low|medium|high|xhigh|max, default medium) and "fallbacks" (true to opt into server-side refusal fallbacks).',
+        _help: 'Models shown in the chat model picker. Add entries as {"id": "<Claude API model id>", "label": "<name>"}. Optional: "effort" (low|medium|high|xhigh|max, default medium; higher thinks longer and costs more; the Effort picker in the chat panel overrides it) and "fallbacks" (true to opt into server-side refusal fallbacks).',
         models: DEFAULT_MODELS
       }, null, 2))
     }
@@ -55,7 +60,9 @@ export class SettingsStore {
 
   currentModel(): ModelOption {
     const list = this.models()
-    return list.find((m) => m.id === this.settings.model) ?? list[0]
+    const m = list.find((x) => x.id === this.settings.model) ?? list[0]
+    // The effort picked in the chat panel wins over the models file.
+    return { ...m, effort: this.settings.effort ?? m.effort ?? 'medium' }
   }
 
   // --- API key: encrypted with the OS keychain via safeStorage, never logged, never sent to the renderer.

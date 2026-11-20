@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { app } from 'electron'
 
@@ -9,7 +9,9 @@ export function ffmpegPath(): string {
   const candidates = [
     join(process.resourcesPath ?? '', 'ffmpeg', exe),
     join(app.getAppPath(), 'vendor', 'ffmpeg', `${process.platform}-${process.arch}`, exe),
-    join(process.cwd(), 'vendor', 'ffmpeg', `${process.platform}-${process.arch}`, exe)
+    join(process.cwd(), 'vendor', 'ffmpeg', `${process.platform}-${process.arch}`, exe),
+    // Apps started from Finder/Dock do not get the shell's PATH, so look in the usual install places too.
+    ...(process.platform === 'win32' ? [] : ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg'])
   ]
   for (const c of candidates) if (existsSync(c)) return c
   return exe
@@ -34,8 +36,19 @@ export function encoderArgs(o: EncodeOptions): string[] {
   return [...input, '-filter_complex', palette, '-loop', '0', o.path]
 }
 
-/** Streams raw RGBA frames into ffmpeg. `nextFrame` returns null when done. */
-export async function encodeVideo(o: EncodeOptions, nextFrame: (index: number) => Promise<Uint8Array | null>): Promise<number> {
+export class RenderCancelled extends Error {
+  constructor() {
+    super('Render cancelled.')
+  }
+}
+
+/**
+ * Streams raw RGBA frames into ffmpeg. `nextFrame` returns null when done.
+ * Never hangs on a dead encoder: every wait also ends when ffmpeg exits or `signal` aborts.
+ * A cancelled or failed render removes its partial output file.
+ */
+export async function encodeVideo(o: EncodeOptions, nextFrame: (index: number) => Promise<Uint8Array | null>, signal?: AbortSignal): Promise<number> {
+  if (signal?.aborted) throw new RenderCancelled()
   mkdirSync(dirname(o.path), { recursive: true })
   const bin = ffmpegPath()
   const proc = spawn(bin, encoderArgs(o), { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true })
@@ -43,32 +56,58 @@ export async function encodeVideo(o: EncodeOptions, nextFrame: (index: number) =
   proc.stderr.on('data', (d: Buffer) => {
     stderr = (stderr + d.toString()).slice(-4000)
   })
+  let exited = false
   const done = new Promise<void>((resolve, reject) => {
-    proc.on('error', (e: NodeJS.ErrnoException) => reject(e.code === 'ENOENT'
-      ? new Error('ffmpeg was not found. Run "npm run ffmpeg" in the project (development), or install ffmpeg and put it on your PATH.')
-      : e))
-    proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg failed (exit ${code}): ${stderr.split('\n').filter(Boolean).slice(-3).join(' | ')}`))))
+    proc.on('error', (e: NodeJS.ErrnoException) => {
+      exited = true
+      reject(e.code === 'ENOENT'
+        ? new Error('ffmpeg was not found. Install it (for example "brew install ffmpeg") or run "npm run ffmpeg" in the project, then try again.')
+        : e)
+    })
+    proc.on('close', (code, sig) => {
+      exited = true
+      if (code === 0) resolve()
+      else reject(new Error(`ffmpeg failed (${code !== null ? `exit ${code}` : sig}): ${stderr.split('\n').filter(Boolean).slice(-3).join(' | ') || 'no output'}`))
+    })
   })
-  let failed: Error | null = null
-  done.catch((e) => (failed = e))
+  done.catch(() => undefined)
+  // Resolves (never rejects) when the encoder is gone or the render is cancelled, to race against waits.
+  const interrupted = new Promise<'ended'>((resolve) => {
+    done.then(() => resolve('ended'), () => resolve('ended'))
+    signal?.addEventListener('abort', () => resolve('ended'), { once: true })
+  })
   proc.stdin.on('error', () => undefined)
+  const check = async (): Promise<void> => {
+    if (signal?.aborted) throw new RenderCancelled()
+    if (exited) {
+      await done
+      throw new Error('ffmpeg stopped before the video was finished.')
+    }
+  }
   let count = 0
   try {
     for (;;) {
-      if (failed) break
-      const frame = await nextFrame(count)
+      await check()
+      const frame = await Promise.race([nextFrame(count), interrupted])
+      await check()
+      if (frame === 'ended') continue
       if (!frame) break
       if (frame.byteLength !== o.width * o.height * 4) throw new Error(`Renderer returned a frame of the wrong size (${frame.byteLength} bytes).`)
       const ok = proc.stdin.write(frame)
-      if (!ok) await new Promise<void>((r) => proc.stdin.once('drain', () => r()))
+      if (!ok) await Promise.race([new Promise<void>((r) => proc.stdin.once('drain', () => r())), interrupted])
       count++
     }
-  } catch (e) {
-    proc.kill()
-    throw e
-  } finally {
     proc.stdin.end()
+    await Promise.race([done, interrupted])
+    if (signal?.aborted) throw new RenderCancelled()
+    await done
+    return count
+  } catch (e) {
+    if (!exited) proc.kill('SIGKILL')
+    proc.stdin.destroy()
+    try {
+      rmSync(o.path, { force: true })
+    } catch { /* partial file */ }
+    throw e
   }
-  await done
-  return count
 }

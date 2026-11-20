@@ -58,6 +58,13 @@ export type AgentEvent =
   | { type: 'error'; kind: AgentErrorKind; message: string; retryable: boolean }
   | { type: 'turn_end'; turn: number; stopped?: boolean }
   | { type: 'reset' }
+  /** A parallel animator started: it gets its own chat tab. Its events carry the same `agent` id. */
+  | { type: 'spawn'; agent: string; name: string; clipId: string; brief: string }
+  /** A message sent to the built-in AI by someone other than the person typing (an MCP client such as Claude Code). */
+  | { type: 'user_message'; text: string; from: string }
+
+/** Events from parallel animators are tagged with their id; the lead agent's are not. */
+export type AgentEnvelope = AgentEvent & { agent?: string }
 
 export interface ModelOption {
   id: string
@@ -74,6 +81,8 @@ export interface Settings {
   mcpPort: number
   exportDir: string
   chatOpen: boolean
+  /** How hard the AI thinks, chosen in the chat panel. Unset = the model's own setting from the models file, or medium. */
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 }
 
 export interface SettingsState {
@@ -136,14 +145,17 @@ export interface InbetweenApi {
   copy(text: string): Promise<void>
   installStudioPlugin(): Promise<{ ok: boolean; path?: string; error?: string }>
   reveal(path: string): Promise<void>
-  agentSend(text: string, view: ViewContext): Promise<void>
-  agentStop(): Promise<void>
+  /** `worker` addresses one parallel animator; without it the lead agent. Stopping the lead stops everyone. */
+  agentSend(text: string, view: ViewContext, worker?: string): Promise<void>
+  agentStop(worker?: string): Promise<void>
   agentReset(): Promise<void>
-  agentRetry(): Promise<void>
-  onAgent(fn: (e: AgentEvent) => void): () => void
+  agentRetry(worker?: string): Promise<void>
+  onAgent(fn: (e: AgentEnvelope) => void): () => void
   onTool(fn: (e: ToolEvent) => void): () => void
   exportClip(args: Record<string, unknown>): Promise<{ ok: boolean; path?: string; error?: string }>
   onExportProgress(fn: (p: ExportProgress) => void): () => void
+  /** Stop the video render in progress. */
+  cancelExport(): Promise<void>
   onRenderRequest(fn: (id: number, r: RenderRequest) => void): () => void
   renderResponse(id: number, result: { ok: boolean; data?: Uint8Array | string; error?: string }): void
   onMenu(fn: (action: string) => void): () => void

@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useRef, useState } from 'react'
-import { activeClip, activeRig, command, isMac, useStore } from '../store'
+import { activeClip, activeRig, command, fpRig, isMac, useStore } from '../store'
 import { IconChat, IconChevron, IconExport, IconEye, IconGear, IconRedo, IconUndo } from './icons'
 
 const spring = { type: 'spring' as const, stiffness: 520, damping: 32 }
@@ -68,7 +68,7 @@ export function TopBar(): React.JSX.Element {
         <span className="crumb-sep">/</span>
         <Popover label={rig.name}>
           {(close) => <>
-            <span className="quiet">Rigs in this scene</span>
+            <span className="quiet">Characters and models in this scene</span>
             {doc.project.rigs.map((r) => (
               <button key={r.id} role="menuitemradio" aria-checked={r.id === rig.id} onClick={() => {
                 void command({ type: 'setActive', rigId: r.id })
@@ -80,12 +80,12 @@ export function TopBar(): React.JSX.Element {
             <button onClick={() => {
               close()
               void window.inbetween.file('importRig').then((r) => r.error && useStore.getState().toast(r.error, 'error'))
-            }}>Import rig…</button>
+            }}>Import model or rig…</button>
           </>}
         </Popover>
       </>}
       <div className="spacer" />
-      <button className="icon-btn" aria-label="First person" title="First-person view through the rig's eyes (V). Click again for the head-locked camera, again to leave." aria-pressed={!!firstPerson} disabled={!rig?.head}
+      <button className="icon-btn" aria-label="First person" title="First-person view through the rig's eyes (V). Click again for the head-locked camera, again to leave." aria-pressed={!!firstPerson} disabled={!fpRig({ doc })}
         onClick={() => useStore.getState().set({ firstPerson: firstPerson === false ? 'first_person' : firstPerson === 'first_person' ? 'head_cam' : false })}><IconEye /></button>
       <button className="icon-btn" aria-label="Undo" title="Undo" disabled={!doc?.canUndo} onClick={() => void command({ type: 'undo' })}><IconUndo /></button>
       <button className="icon-btn" aria-label="Redo" title="Redo" disabled={!doc?.canRedo} onClick={() => void command({ type: 'redo' })}><IconRedo /></button>

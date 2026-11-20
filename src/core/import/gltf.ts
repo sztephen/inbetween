@@ -115,7 +115,7 @@ export function importGlbRig(bytes: Uint8Array, id: string, name?: string, path?
   }
 
   const rig: Rig = {
-    id, name: name ?? (path ? path.replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, '') : 'glTF rig'), source: 'gltf', units: 'meters',
+    id, name: name ?? (path ? path.replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, '') : 'glTF rig'), source: 'gltf', units: (json.asset as { extras?: { inbetweenUnits?: string } } | undefined)?.extras?.inbetweenUnits === 'studs' ? 'studs' : 'meters',
     bones, root: rootName, hips: rootName, chains: [], forward: [0, 0, 1],
     origin: { p: [0, 0, 0], q: qFromAxisAngle([0, 1, 0], Math.PI) },
     mesh: path ? { type: 'glb', path } : undefined,

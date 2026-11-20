@@ -168,6 +168,10 @@ export function opHold(clip: Clip, rigId: string | null, frame: number, duration
       if (c.start > frame) c.start += duration
       if (c.end > frame) c.end += duration
     }
+    for (const a of clip.attachments ?? []) {
+      if (a.start > frame) a.start += duration
+      if (a.end > frame) a.end += duration
+    }
     for (const m of clip.markers) if (m.frame > frame) m.frame += duration
     clip.length += duration
   }

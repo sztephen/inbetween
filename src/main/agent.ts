@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
-import type { ToolRegistry } from '../core/tools/registry'
+import type { ToolRegistry, ToolResult } from '../core/tools/registry'
 import type { AgentErrorKind, AgentEvent, ModelOption, Usage, ViewContext } from '../shared/api'
 
 type Msg = Anthropic.Beta.BetaMessageParam
@@ -9,8 +9,26 @@ export const FALLBACK_BETA = 'server-side-fallback-2026-07-01'
 const MAX_TOKENS = 32000
 const MAX_ITERATIONS = 80
 
+/** A tool only the built-in agent has (not part of the shared registry that MCP clients see). */
+export interface AgentTool {
+  name: string
+  description: string
+  input_schema: Record<string, unknown>
+  chip(input: unknown): string
+  run(input: unknown, signal: AbortSignal): Promise<ToolResult>
+}
+
+/** Tools that only read: after anything else, the clip needs checking again. */
+const READ_ONLY = new Set(['get_scene', 'get_rig', 'list_clips', 'get_clip', 'list_poses', 'preview', 'check', 'motion_report', 'export', 'cancel_render'])
+
 export interface AgentDeps {
   registry: ToolRegistry
+  /** Pin this session to one clip (and rig): tool calls that name no clip use it instead of the active clip. Used by parallel animators. */
+  bind?: { clipId: string; rigId?: string }
+  /** Extra tools for this session only. */
+  extraTools?: AgentTool[]
+  /** Identity for the manual-edit journal. Default "agent". */
+  consumer?: string
   /** Returns a client, or null when no API key is stored. */
   getClient(): Anthropic | null
   getModel(): ModelOption
@@ -62,18 +80,54 @@ export class AgentSession {
   private abort: AbortController | null = null
   private turn = 0
   running = false
+  /** Message of the last error this session reported, cleared when a run starts. */
+  lastError: string | null = null
+  /** Whether the last run was stopped by the user. */
+  lastStopped = false
+  private deps: AgentDeps
+  private consumer: string
   /** Total usage across the conversation. */
   totals: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 
-  constructor(private deps: AgentDeps) {
-    deps.registry.store.touchConsumer('agent')
+  constructor(deps: AgentDeps) {
+    this.consumer = deps.consumer ?? 'agent'
+    this.deps = {
+      ...deps,
+      emit: (e) => {
+        if (e.type === 'error') this.lastError = e.message
+        deps.emit(e)
+      }
+    }
+    deps.registry.store.touchConsumer(this.consumer)
+  }
+
+  /** The text of the most recent assistant reply. */
+  lastReply(): string {
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const m = this.messages[i]
+      if (m.role !== 'assistant' || typeof m.content === 'string') continue
+      const text = m.content.filter((b): b is Anthropic.Beta.BetaTextBlockParam => b.type === 'text').map((b) => b.text).join('').trim()
+      if (text) return text
+    }
+    return ''
+  }
+
+  /** Fill in the bound clip and rig on calls that leave them out. */
+  private bound(name: string, input: unknown, props: Map<string, Set<string>>): unknown {
+    const b = this.deps.bind
+    if (!b || !input || typeof input !== 'object') return input
+    const has = props.get(name)
+    const out = { ...(input as Record<string, unknown>) }
+    if (has?.has('clip') && out.clip === undefined) out.clip = b.clipId
+    if (b.rigId && has?.has('rig') && out.rig === undefined && name !== 'check' && name !== 'remove_rig') out.rig = b.rigId
+    return out
   }
 
   reset(): void {
     this.stop()
     this.messages = []
     this.totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
-    this.deps.registry.store.takeUserEdits('agent')
+    this.deps.registry.store.takeUserEdits(this.consumer)
     this.deps.emit({ type: 'reset' })
   }
 
@@ -89,14 +143,15 @@ export class AgentSession {
     if (this.running) return
     const content: ContentParam[] = [{ type: 'text', text }]
     const p = this.deps.registry.store.project
-    const clip = p.clips.find((c) => c.id === p.activeClipId)
-    const rig = p.rigs.find((r) => r.id === p.activeRigId)
+    const bind = this.deps.bind
+    const clip = p.clips.find((c) => c.id === (bind?.clipId ?? p.activeClipId))
+    const rig = p.rigs.find((r) => r.id === (bind?.rigId ?? p.activeRigId))
     const ctx: string[] = []
-    if (clip) ctx.push(`active clip: "${clip.name}" (${clip.length} frames at ${clip.fps} fps${clip.loop ? ', looping' : ''})`)
-    if (rig) ctx.push(`active rig: "${rig.name}"`)
+    if (clip) ctx.push(`${bind ? 'your clip' : 'active clip'}: "${clip.name}" (${clip.length} frames at ${clip.fps} fps${clip.loop ? ', looping' : ''})`)
+    if (rig) ctx.push(`${bind ? 'your rig' : 'active rig'}: "${rig.name}"`)
     if (view) ctx.push(`the user is looking at frame ${Math.round(view.frame)}${view.selectedBone ? ` with ${view.selectedBone} selected` : ''}`)
     if (ctx.length) content.push({ type: 'text', text: `<viewport>${ctx.join('; ')}</viewport>` })
-    const edits = this.deps.registry.store.takeUserEdits('agent')
+    const edits = this.deps.registry.store.takeUserEdits(this.consumer)
     if (edits.length) {
       content.push({ type: 'text', text: `<manual_edits>The user edited the animation by hand since your last turn. Keep these changes unless asked otherwise:\n- ${edits.join('\n- ')}\n</manual_edits>` })
     }
@@ -115,6 +170,7 @@ export class AgentSession {
     const turn = ++this.turn
     this.running = true
     this.abort = new AbortController()
+    this.lastError = null
     emit({ type: 'turn_start', turn })
     let stopped = false
     try {
@@ -124,12 +180,31 @@ export class AgentSession {
         return
       }
       const model = this.deps.getModel()
-      const tools: Anthropic.Beta.BetaTool[] = registry.list().map((t) => ({
+      const extra = new Map((this.deps.extraTools ?? []).map((t) => [t.name, t]))
+      // A bound session works in the clip it was given, so it gets no tool for making another.
+      const listed = registry.list().filter((t) => !t.mcpOnly && !(this.deps.bind && t.name === 'create_clip'))
+      const props = new Map(listed.map((t) => [t.name, new Set(Object.keys((t.inputSchema.properties as object | undefined) ?? {}))]))
+      const tools: Anthropic.Beta.BetaTool[] = [
+        ...listed.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
+        ...[...extra.values()].map((t) => ({ name: t.name, description: t.description, inputSchema: t.input_schema }))
+      ].map((t) => ({
         name: t.name, description: t.description,
         input_schema: t.inputSchema as Anthropic.Beta.BetaTool['input_schema'],
         eager_input_streaming: true
       }))
+      const chipFor = (name: string, input: unknown): string => {
+        const x = extra.get(name)
+        if (!x) return registry.chipFor(name, input)
+        try {
+          return x.chip(input)
+        } catch {
+          return name.replace(/_/g, ' ')
+        }
+      }
       let jsonRetries = 0
+      // Edits made since the last `check`, and whether this turn has already been sent back to fix its problems.
+      let unchecked = false
+      let autoChecked = false
 
       for (let i = 0; i < MAX_ITERATIONS; i++) {
         const id = `a${turn}_${i}`
@@ -151,7 +226,7 @@ export class AgentSession {
           for await (const ev of stream) {
             if (ev.type === 'content_block_start' && ev.content_block.type === 'tool_use') {
               toolChips.set(ev.index, ev.content_block.id)
-              emit({ type: 'tool_start', id, toolId: ev.content_block.id, name: ev.content_block.name, chip: registry.chipFor(ev.content_block.name, undefined) })
+              emit({ type: 'tool_start', id, toolId: ev.content_block.id, name: ev.content_block.name, chip: chipFor(ev.content_block.name, undefined) })
             } else if (ev.type === 'content_block_delta') {
               if (ev.delta.type === 'text_delta') emit({ type: 'text', id, delta: ev.delta.text })
               else if (ev.delta.type === 'thinking_delta') emit({ type: 'thinking', id, delta: ev.delta.thinking })
@@ -201,6 +276,24 @@ export class AgentSession {
         if (message.stop_reason === 'pause_turn') continue
         if (message.stop_reason !== 'tool_use' || !toolUses.length) {
           if (message.stop_reason === 'max_tokens') emit({ type: 'error', kind: 'truncated', message: 'The reply was cut off at the output limit. Say "continue" to carry on.', retryable: false })
+          else if (unchecked && !autoChecked && !this.abort.signal.aborted) {
+            // The animator called it done with edits it never checked. Run the validators for it, and
+            // if they find something, hand the list back once so it can fix what is really wrong.
+            autoChecked = true
+            const toolId = `auto_check_${turn}_${i}`
+            emit({ type: 'tool_start', id, toolId, name: 'check', chip: 'checking the result' })
+            const res = await registry.call('check', this.bound('check', {}, props), 'agent', this.consumer)
+            emit({ type: 'tool_end', toolId, isError: !!res.isError, summary: res.text.slice(0, 600) })
+            unchecked = false
+            let failed = false
+            try {
+              failed = !res.isError && JSON.parse(res.text.split('\n\nNOTE:')[0]).ok === false
+            } catch { /* not a check report */ }
+            if (failed) {
+              this.messages.push({ role: 'user', content: [{ type: 'text', text: `<automatic_check>The app ran \`check\` on your finished work and it still reports problems. Fix the ones that are real mistakes, then preview the result. If one is intentional, leave it and say so in a sentence.\n${res.text}</automatic_check>` }] })
+              continue
+            }
+          }
           return
         }
 
@@ -211,8 +304,18 @@ export class AgentSession {
             emit({ type: 'tool_end', toolId: t.id, isError: true, summary: 'stopped' })
             continue
           }
-          emit({ type: 'tool_label', toolId: t.id, chip: registry.chipFor(t.name, t.input) })
-          const res = await registry.call(t.name, t.input, 'agent', 'agent')
+          emit({ type: 'tool_label', toolId: t.id, chip: chipFor(t.name, t.input) })
+          const x = extra.get(t.name)
+          let res: ToolResult
+          if (x) {
+            try {
+              res = await x.run(t.input, this.abort.signal)
+            } catch (err) {
+              res = { text: `${t.name} failed: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+            }
+          } else res = await registry.call(t.name, this.bound(t.name, t.input, props), 'agent', this.consumer)
+          if (t.name === 'check') unchecked = res.isError ? unchecked : false
+          else if (!x && !READ_ONLY.has(t.name) && !res.isError) unchecked = true
           const blocks: Anthropic.Beta.BetaToolResultBlockParam['content'] = [{ type: 'text', text: res.text }]
           for (const img of res.images ?? []) blocks.push({ type: 'image', source: { type: 'base64', media_type: img.mimeType, data: img.data } })
           results.push({ type: 'tool_result', tool_use_id: t.id, content: blocks, ...(res.isError ? { is_error: true } : {}) })
@@ -235,6 +338,7 @@ export class AgentSession {
       }
     } finally {
       this.running = false
+      this.lastStopped = stopped
       this.abort = null
       emit({ type: 'turn_end', turn, stopped })
     }

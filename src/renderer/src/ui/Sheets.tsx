@@ -1,6 +1,6 @@
 import { motion } from 'motion/react'
 import { useState } from 'react'
-import { activeClip, activeRig, api, useStore } from '../store'
+import { activeClip, activeRig, api, fpRig, useStore } from '../store'
 
 const spring = { type: 'spring' as const, stiffness: 420, damping: 32 }
 
@@ -116,14 +116,14 @@ export function ExportSheet(): React.JSX.Element | null {
     const [w, h] = size.split('x').map(Number)
     setBusy(true)
     void api.exportClip({
-      format, clip: clip.id, rig: rig.id,
+      format, clip: clip.id, rig: video && (camera === 'first_person' || camera === 'head_cam') ? fpRig({ doc })?.id ?? rig.id : rig.id,
       ...(video ? { width: w, height: h, fps: fps || clip.fps, background: bg === 'color' ? color : bg === 'transparent' && canAlpha ? 'transparent' : 'theme', ...(camera !== 'auto' ? { camera } : {}) } : {})
     }).then((r) => {
       setBusy(false)
       if (r.ok && r.path) {
         useStore.getState().toast(`Exported ${r.path.replace(/^.*[\\/]/, '')}`, 'info', r.path)
         close()
-      } else if (r.error) useStore.getState().toast(r.error, 'error')
+      } else if (r.error) useStore.getState().toast(/cancelled/i.test(r.error) ? 'Render stopped.' : r.error, /cancelled/i.test(r.error) ? 'info' : 'error')
     })
   }
   return (
@@ -150,8 +150,8 @@ export function ExportSheet(): React.JSX.Element | null {
               <option value="auto">{clip.camera.length ? 'Camera track' : 'Three-quarter'}</option>
               {clip.camera.length > 0 && <option value="three_quarter">Three-quarter</option>}
               <option value="front">Front</option><option value="side">Right side</option><option value="left">Left side</option><option value="back">Back</option><option value="top">Top</option>
-              {rig.head && <option value="first_person">First person</option>}
-              {rig.head && <option value="head_cam">First person, locked to head</option>}
+              {fpRig({ doc }) && <option value="first_person">First person</option>}
+              {fpRig({ doc }) && <option value="head_cam">First person, locked to head</option>}
             </select>
             <label>Background</label>
             <div className="row">
@@ -173,7 +173,9 @@ export function ExportSheet(): React.JSX.Element | null {
         </section>
       )}
       <div className="foot">
-        <button className="btn" disabled={busy} onClick={close}>Cancel</button>
+        {busy && video
+          ? <button className="btn" onClick={() => void api.cancelExport()}>Stop render</button>
+          : <button className="btn" disabled={busy} onClick={close}>Cancel</button>}
         <button className="btn primary" disabled={busy || robloxBlocked} onClick={run}>{busy ? 'Exporting…' : 'Export'}</button>
       </div>
     </Sheet>

@@ -16,11 +16,11 @@ You are animating 3D rigs in Inbetween. You do the animating yourself, the way a
 
 1. **Read the rig first.** Call `get_rig` before posing anything. Note the rest positions of the hands, feet and hips and each IK chain's `max_reach`, so your targets are reachable. Call `get_scene` if you do not know what rigs and clips exist.
 
-2. **Block the key poses.** Decide the storytelling poses, the few frames that would explain the action on their own, and set them with `set_pose` using `timing: "stepped"`. Pose by goals: where the hips are, where each hand and foot is, where the head looks. Set the hips first, since everything hangs off them. Read each result: it tells you where the effectors landed and whether a goal was out of reach or clamped by a joint limit.
+2. **Block the key poses.** Decide the storytelling poses, the few frames that would explain the action on their own, and set them with `set_pose` using `timing: "stepped"`. Pose by goals: where the hips are, where each hand and foot is, where the head looks. Set the hips first, since everything hangs off them. Read each result: it tells you where the effectors landed, whether a goal was out of reach or clamped by a joint limit, and in `pose_notes` whether the pose puts a part through the ground or through another part, or leaves the weight off the feet.
 
 3. **Preview and look.** Call `preview` with `frames: "keys"` and study the image. Each pose should read clearly as a silhouette from the front and the side: limbs clear of the body, a visible line of action, weight over the supporting foot. Fix anything that reads badly before going further. It is much cheaper to fix a pose now than after the in-betweens exist.
 
-4. **Add breakdowns and in-betweens, then timing.** Breakdowns are the poses between keys that decide *how* the motion travels: which part leads, how the arc curves, what drags behind. Then replace the stepped timing with real easing using `set_timing`, and move keys closer together or further apart until the rhythm is right. Fewer frames between poses reads as fast and light; more frames reads as slow and heavy.
+4. **Add breakdowns and in-betweens, then timing.** Breakdowns are the poses between keys that decide *how* the motion travels: which part leads, how the arc curves, what drags behind. Then replace the stepped timing with real easing using `set_timing`, and move keys closer together or further apart until the rhythm is right. Fewer frames between poses reads as fast and light; more frames reads as slow and heavy. Still frames cannot show you timing, so call `motion_report` once the easing is in: it gives the speed of the hips, head, hands and feet through the clip, where each one stops, and where nothing moves. Compare it with what you intended (a sharp peak for a strike, a ramp for an ease, parts stopping a few frames apart for overlap) and retime until it matches.
 
 5. **Apply the principles that fit the action.**
    - *Anticipation*: a smaller move in the opposite direction before the main one (crouch before a jump, pull back before a punch).
@@ -29,7 +29,7 @@ You are animating 3D rigs in Inbetween. You do the animating yourself, the way a
    - *Weight*: the hips shift over the supporting foot before the other foot lifts. Heavy things start slow and are hard to stop.
    - *Combat timing*: a long anticipation, a strike that takes only two or three frames, then a held impact pose (`set_timing` holds) before the recovery. The contrast is what gives a hit its force.
 
-6. **Check, fix, preview again.** Call `check`. It reports foot sliding, joint limits, self-intersection, jitter, loop seams and ground penetration with frame numbers. Fix each one, then `check` again until it is clean. A clean check means the mechanics are sound, not that the motion looks good, so `preview` again as well.
+6. **Check, fix, preview again.** Call `check`. It reports foot sliding, joint limits, self-intersection, jitter, loop seams, ground penetration and held poses that are off balance, with frame numbers. Fix each one, then `check` again until it is clean. A clean check means the mechanics are sound, not that the motion looks good, so `preview` again as well.
 
 7. **Do not call it done until you have looked.** After your last change, however small, `preview` the result and look at it before telling the person the animation is finished. Say what you made, the clip length, and anything you were unsure about.
 
@@ -42,6 +42,9 @@ You are animating 3D rigs in Inbetween. You do the animating yourself, the way a
 - `add_marker` names the frame a gameplay event happens on (`hit`, `footstep`).
 - `undo` steps back through your edits and the person's edits alike.
 - If a tool result says the person made manual edits, they adjusted something by hand. Treat those as intended and keep them unless asked to change them.
+- Video exports (`mp4`, `gif`, `webm`) render frame by frame and show progress in the app. `cancel_render` stops one that is running (the person can also press Stop in the app); `cancel_render` with `status_only: true` reports progress.
+- Over MCP only: when the person asks for Inbetween's own AI (the built-in or in-app AI) to make the motion, call `ask_inbetween_ai` with a complete brief. It animates inside the app on the person's API key while they watch in the chat panel, and returns its summary when done. Then review the clip yourself (`get_clip`, `preview`, `check`, `motion_report`) and fine-tune it with your own tools. Do not use it unless the person asks for it.
+- Several animations at once: when different workers (sub-agents) animate different clips at the same time, create every clip first, then have each worker pass its own `clip` (and `rig`) on every call. The active clip is shared, so a call that leaves `clip` out may land in someone else's animation. The undo history is shared too, so a worker should re-pose instead of calling `undo`.
 
 ## Recipes
 
@@ -76,3 +79,13 @@ First-person animations are judged from inside the character's head, so preview 
 ### Props
 
 A prop is a small rig: boxes joined at pivots. Add one with `add_rig` (presets for doors, chests, levers, crates, or custom `parts`), read it with `get_rig`, and animate its parts with `set_pose` `bones` rotations. Mechanical things want anticipation and settle too: a door starts slow, swings, and bounces slightly at its stop (`bouncy` timing); a lever snaps and rings. When a character uses a prop, key the prop and the character in the same clip, and pin the hand to the handle's path with hand goals on the same frames.
+
+### The person's own models
+
+The person can import their own models (File > Import Model or Rig, or ask you with a file path and `add_rig` type `"file"`): rigged characters, or plain objects such as a sword, a chair or a vehicle. They show with their real mesh. `get_scene` lists them and `get_rig` gives their parts and size.
+
+- **Size and place first.** A new model is stood beside the existing rigs, and metre-sized files are converted to studs in a studs scene. Preview it next to the character; if it is the wrong size or in the wrong spot, fix it with `place_rig` (position, rotation, scale) before animating.
+- **Animating the model itself.** Its parts are bones: rotate them with `set_pose` `bones`, and move the whole thing by keying its root part's `position` (an offset from where `place_rig` put it). Pass `rig` on every call so the keys land on the model and not the character.
+- **Both at once.** Characters and models are keyed in the same clip on the same frames. Pose the model on a frame first, then the character, so the character can reach for where the model now is. Preview shows every rig together.
+- **Carrying** (a sword, a cup, a box, a hat): `attach` the model to `right_hand`, `Head` or any bone for the frames it is held. It then follows that bone exactly on every frame. Preview a few frames and adjust the grip with `position` and `rotation`. To pick something up, start the attachment on the frame the hand arrives, with `keep_position: true`; to put it down, end the attachment and place or key the model where it lands.
+- **Touching and operating** (a door handle, a lever, another character's shoulder): give the hand goal `on: {rig, part}` instead of a position, on every key where the hand should be on that part. The part's position is read at that frame, so key the model's motion first and add breakdowns where the part moves along a curve.

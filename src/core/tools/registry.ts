@@ -42,12 +42,18 @@ export interface VideoRequest {
   camera: string
   /** Rig for first-person cameras. */
   rigId?: string
+  /** Who asked for the render, so stopping that AI can stop its render too. */
+  source?: 'agent' | 'mcp'
 }
 
 /** Services the surrounding app provides to tools (rendering, files). Tests supply fakes. */
 export interface ToolHost {
   renderPreview(req: PreviewRequest): Promise<ToolImage>
   renderVideo(req: VideoRequest, onProgress?: (p: number) => void): Promise<{ path: string; frames: number }>
+  /** Stop the video render in progress, if any. Returns what was stopped, or null when nothing was rendering. */
+  cancelRender?(): { label: string; progress: number } | null
+  /** The video render in progress, if any. */
+  renderStatus?(): { label: string; progress: number; path: string } | null
   writeFile(path: string, data: Uint8Array | string): Promise<string>
   readFile(path: string): Promise<Uint8Array>
   /** Resolve a file name (or absolute path) to where exports are written. */
@@ -59,6 +65,8 @@ export interface CallContext {
   host: ToolHost
   /** 'agent' for the built-in chat, 'mcp' for external clients. */
   source: 'agent' | 'mcp'
+  /** Identity of the calling AI client, e.g. "agent" or "mcp:<session id>". */
+  consumer?: string
   /** Report which frames/bones changed so the UI can animate them. */
   touch(t: Touched): void
 }
@@ -70,6 +78,10 @@ export interface ToolDef<S extends z.ZodType = z.ZodType> {
   /** Short present-tense label for the UI chip, e.g. "posing frame 12". */
   chip(args: z.infer<S>): string
   handler(args: z.infer<S>, ctx: CallContext): Promise<ToolResult | string | object> | ToolResult | string | object
+  /** Runs immediately instead of waiting behind other calls (control tools such as cancelling a render). */
+  concurrent?: boolean
+  /** Offered to MCP clients only, never to the built-in agent. */
+  mcpOnly?: boolean
 }
 
 export const defineTool = <S extends z.ZodType>(t: ToolDef<S>): ToolDef<S> => t
@@ -78,6 +90,7 @@ export interface ToolListing {
   name: string
   description: string
   inputSchema: Record<string, unknown>
+  mcpOnly?: boolean
 }
 
 export type ToolListener = (e: { phase: 'start' | 'end'; id: string; name: string; chip: string; source: 'agent' | 'mcp'; isError?: boolean }) => void
@@ -93,6 +106,11 @@ export class ToolRegistry {
     for (const d of defs) this.tools.set(d.name, d as ToolDef)
   }
 
+  /** Add a tool after construction (tools that need the app, such as handing work to the built-in AI). */
+  register(def: ToolDef): void {
+    this.tools.set(def.name, def as ToolDef)
+  }
+
   onCall(fn: ToolListener): () => void {
     this.listeners.add(fn)
     return () => this.listeners.delete(fn)
@@ -102,7 +120,7 @@ export class ToolRegistry {
     return [...this.tools.values()].map((t) => {
       const schema = z.toJSONSchema(t.schema, { target: 'draft-7' }) as Record<string, unknown>
       delete schema.$schema
-      return { name: t.name, description: t.description, inputSchema: schema }
+      return { name: t.name, description: t.description, inputSchema: schema, ...(t.mcpOnly ? { mcpOnly: true } : {}) }
     })
   }
 
@@ -140,7 +158,7 @@ export class ToolRegistry {
       let result: ToolResult
       const touched: Touched = {}
       try {
-        const ctx: CallContext = { store: this.store, host: this.host, source, touch: (t) => Object.assign(touched, t) }
+        const ctx: CallContext = { store: this.store, host: this.host, source, consumer, touch: (t) => Object.assign(touched, t) }
         const out = await tool.handler(parsed.data, ctx)
         if (typeof out === 'string') result = { text: out }
         else if (out && typeof out === 'object' && 'text' in out && typeof (out as ToolResult).text === 'string') result = out as ToolResult
@@ -155,6 +173,7 @@ export class ToolRegistry {
       for (const l of this.listeners) l({ phase: 'end', id, name, chip, source, isError: result.isError })
       return result
     }
+    if (this.tools.get(name)?.concurrent) return run()
     const p = this.queue.then(run, run)
     this.queue = p.catch(() => undefined)
     return p

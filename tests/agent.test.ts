@@ -50,14 +50,15 @@ function mock(handler: (n: number, body: any) => { status?: number; headers?: Re
   return new Promise((resolve) => server!.listen(0, '127.0.0.1', () => resolve({ url: `http://127.0.0.1:${(server!.address() as AddressInfo).port}`, requests })))
 }
 
-function session(url: string | null, opts: { key?: string | null } = {}) {
+function session(url: string | null, opts: { key?: string | null; deps?: (h: ReturnType<typeof makeHarness>) => Partial<ConstructorParameters<typeof AgentSession>[0]> } = {}) {
   const h = makeHarness()
   const events: AgentEvent[] = []
   const agent = new AgentSession({
     registry: h.registry, system: 'test system prompt',
     getClient: () => (opts.key === null || url === null ? null : createClient(opts.key ?? 'sk-ant-test', url)),
     getModel: () => ({ id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', effort: 'medium', fallbacks: true }),
-    emit: (e) => events.push(e)
+    emit: (e) => events.push(e),
+    ...opts.deps?.(h)
   })
   return { h, agent, events }
 }
@@ -86,11 +87,13 @@ describe('built-in agent loop (mocked Claude API)', () => {
     expect(text.join('')).toBe('Blocking the nod.Done, reviewed the preview.')
     // Tool chips: start, label refined once the input is complete, end with status.
     const starts = events.filter((e) => e.type === 'tool_start') as Extract<AgentEvent, { type: 'tool_start' }>[]
-    expect(starts.map((s) => s.name)).toEqual(['set_pose', 'set_pose', 'set_pose', 'preview'])
+    // The last one is the app's own check of the finished work (clean here, so nothing more is asked of the model).
+    expect(starts.map((s) => s.name)).toEqual(['set_pose', 'set_pose', 'set_pose', 'preview', 'check'])
     const labels = events.filter((e) => e.type === 'tool_label').map((e) => (e as { chip: string }).chip)
     expect(labels).toEqual(['posing frame 0', 'posing frame 10', 'set pose', 'previewing'])
     const ends = events.filter((e) => e.type === 'tool_end') as Extract<AgentEvent, { type: 'tool_end' }>[]
-    expect(ends.map((e) => e.isError)).toEqual([false, false, true, false])
+    expect(ends.map((e) => e.isError)).toEqual([false, false, true, false, false])
+    expect(m.requests).toHaveLength(3)
     expect(ends[3].image).toBeTruthy()
     // Usage per message and running totals.
     const usage = events.filter((e) => e.type === 'usage') as Extract<AgentEvent, { type: 'usage' }>[]
@@ -187,6 +190,63 @@ describe('built-in agent loop (mocked Claude API)', () => {
     await agent.send('y')
     expect([...events].reverse().find((e) => e.type === 'error')).toMatchObject({ kind: 'truncated' })
     expect(h.store.project.clips.some((c) => c.name === 'Nope')).toBe(false)
+  })
+
+  it('checks unchecked work when the model stops, and sends real problems back once', async () => {
+    const m = await mock((n) => {
+      // Hips two units down with the feet free: the legs go through the floor.
+      if (n === 1) return { body: streamBody([{ type: 'tool_use', id: 'toolu_a', name: 'set_pose', input: { frame: 0, hips: { position: [0, -2, 0] }, keep_feet: false } }], 'tool_use') }
+      if (n === 2) return { body: streamBody([{ type: 'text', text: 'Done.' }], 'end_turn') }
+      return { body: streamBody([{ type: 'text', text: 'Leaving it, the sink is intended.' }], 'end_turn') }
+    })
+    const { agent, events } = session(m.url)
+    await agent.send('sink into the floor')
+    // One extra request carrying the check report; the second "done" is accepted as is.
+    expect(m.requests).toHaveLength(3)
+    const sent = JSON.stringify(m.requests[2].body.messages[m.requests[2].body.messages.length - 1].content)
+    expect(sent).toContain('automatic_check')
+    expect(sent).toContain('ground_penetration')
+    expect(events.filter((e) => e.type === 'tool_start').map((e) => (e as { name: string }).name)).toEqual(['set_pose', 'check'])
+    expect(agent.lastReply()).toBe('Leaving it, the sink is intended.')
+  })
+
+  it('a bound session works in its own clip and can run session-only tools', async () => {
+    let ran: unknown = null
+    const m = await mock((n) => {
+      if (n === 1) return { body: streamBody([
+        { type: 'tool_use', id: 'toolu_a', name: 'set_pose', input: { frame: 5 } },
+        { type: 'tool_use', id: 'toolu_b', name: 'extra', input: { x: 1 } }
+      ], 'tool_use') }
+      return { body: streamBody([{ type: 'text', text: 'ok' }], 'end_turn') }
+    })
+    let boundId = ''
+    const { h, agent, events } = session(m.url, { deps: (h) => {
+      const before = h.store.project.activeClipId
+      boundId = h.store.mutate('agent', 'second clip', (p) => {
+        p.clips.push({ ...structuredClone(p.clips[0]), id: 'clip_b', name: 'B', tracks: {}, ikTracks: {}, contacts: [], markers: [], camera: [] })
+        return 'clip_b'
+      })
+      expect(h.store.project.activeClipId).toBe(before)
+      return {
+        bind: { clipId: boundId, rigId: h.store.project.rigs[0].id }, consumer: 'agent:w1',
+        extraTools: [{ name: 'extra', description: 'x', input_schema: { type: 'object' }, chip: () => 'extra chip', run: async (input) => {
+          ran = input
+          return { text: 'extra ran' }
+        } }]
+      }
+    } })
+    await agent.send('pose it')
+    const rigId = h.store.project.rigs[0].id
+    expect(Object.keys(getClip(h.store.project, boundId).tracks[rigId] ?? {}).length).toBeGreaterThan(0)
+    expect(getClip(h.store.project).id).not.toBe(boundId)
+    expect(getClip(h.store.project).tracks[rigId]).toBeUndefined()
+    expect(ran).toEqual({ x: 1 })
+    expect(events.filter((e) => e.type === 'tool_label').map((e) => (e as { chip: string }).chip)).toEqual(['posing frame 5', 'extra chip'])
+    // Bound sessions are not offered create_clip; the extra tool is listed.
+    const names = m.requests[0].body.tools.map((t: { name: string }) => t.name)
+    expect(names).not.toContain('create_clip')
+    expect(names).toContain('extra')
+    expect(m.requests[0].body.messages[0].content[1].text).toContain('your clip: "B"')
   })
 
   it('describes unknown errors without leaking internals', () => {

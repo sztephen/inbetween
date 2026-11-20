@@ -3,21 +3,22 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSyn
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, isAbsolute, join } from 'node:path'
-import { getClip, getRig, newId } from '../core/clip'
+import { createClip, getClip, getRig, newId, settleNewRig } from '../core/clip'
 import { defaultProject, parseProject, ProjectStore, serializeProject } from '../core/document'
 import { clipToSequence, parseRbxmx, sequenceToClip } from '../core/export/rbxmx'
 import { importGlbRig } from '../core/import/gltf'
 import { importRobloxRig } from '../core/import/robloxRig'
 import { buildTools } from '../core/tools'
-import { ToolRegistry, type ToolHost, type ToolImage } from '../core/tools/registry'
+import { defineTool, ToolRegistry, type ToolHost, type ToolImage } from '../core/tools/registry'
 import type { Rig } from '../core/types'
 import workflow from '../core/workflow.md?raw'
 import type { DocState, ExportProgress, McpInfo, RenderRequest, Settings, SettingsState, UserCommand, ViewContext } from '../shared/api'
-import { AgentSession, createClient } from './agent'
+import { AgentSession, createClient, type AgentTool } from './agent'
 import { McpHost, newToken } from './mcp'
 import { SettingsStore } from './settings'
 import { runUserCommand } from './userCommands'
-import { encodeVideo } from './video'
+import { encodeVideo, RenderCancelled } from './video'
+import { z } from 'zod'
 
 app.setName('Inbetween')
 // Development/test conveniences. Ignored in packaged builds so a shipped app always uses the
@@ -35,6 +36,19 @@ const SYSTEM_PROMPT =
   'every tool call you make updates the viewport immediately, and the person can see small chips for each call, so you do not need to narrate each step. ' +
   'Keep chat replies short and plain: say what you are about to do when it helps, and finish with a brief summary of what you made and anything worth their attention. ' +
   'When a request is ambiguous in a way that changes the animation substantially, make a reasonable choice, say what you chose, and carry on.\n\n' + workflow
+
+const LEAD_PROMPT = SYSTEM_PROMPT +
+  '\n\n## Several animations in one request\n\n' +
+  'When the person asks for two or more separate animations in one message ("a punch, a walk cycle and a wave"), do not animate them one after another yourself. ' +
+  'Call `animate_in_parallel` once with one task per animation: each gets its own clip and its own animator, they all work at the same time, and the person can follow each in its own tab. ' +
+  'Afterwards, reply with one short line per clip. A single animation, or several steps of one animation, you do yourself.'
+
+const workerPrompt = (clip: string, rig: string): string => SYSTEM_PROMPT +
+  '\n\n## You are one of several animators working at the same time\n\n' +
+  `Each animator has their own clip. Yours is "${clip}", already created and empty, on the rig "${rig}". Tool calls that leave out \`clip\` and \`rig\` use yours, so you can leave them out. ` +
+  'Work only in your clip: do not activate, rename or delete clips, and change your own clip\'s length, fps or loop flag with `update_clip` if the brief needs it. ' +
+  'The undo history is shared with the other animators, so do not call `undo`; fix a pose by posing it again or deleting its keys. ' +
+  'Nobody can answer questions while you work, so make reasonable choices and finish the animation, then give a two or three sentence summary.'
 
 let win: BrowserWindow | null = null
 let rendererReady: Promise<void> = Promise.resolve()
@@ -73,6 +87,16 @@ function sendExportProgress(p: ExportProgress): void {
   win?.webContents.send('export:progress', p)
 }
 
+/** The video render in progress. Only one runs at a time (tool calls are serialised). */
+let currentRender: { abort: AbortController; label: string; progress: number; path: string; source?: 'agent' | 'mcp' } | null = null
+
+function cancelRender(onlySource?: 'agent' | 'mcp'): { label: string; progress: number } | null {
+  const r = currentRender
+  if (!r || (onlySource && r.source !== onlySource)) return null
+  r.abort.abort()
+  return { label: r.label, progress: r.progress }
+}
+
 const host: ToolHost = {
   async renderPreview(req): Promise<ToolImage> {
     const data = await renderInWindow({ kind: 'preview', req })
@@ -86,6 +110,8 @@ const host: ToolHost = {
     const total = Math.max(1, Math.round(seconds * req.fps) + (clip.loop ? 0 : 1))
     const width = req.width - (req.width % 2), height = req.height - (req.height % 2)
     const label = `Rendering ${req.format.toUpperCase()}`
+    const job = { abort: new AbortController(), label, progress: 0, path: req.path, source: req.source }
+    currentRender = job
     sendExportProgress({ active: true, label, progress: 0 })
     try {
       await renderInWindow({ kind: 'videoBegin', req: { ...req, width, height }, frames: total })
@@ -93,18 +119,29 @@ const host: ToolHost = {
         { format: req.format, path: req.path, width, height, fps: req.fps, transparent: req.background === 'transparent' },
         async (i) => {
           if (i >= total) return null
-          const data = await renderInWindow({ kind: 'videoFrame', index: i, time: i / req.fps })
-          sendExportProgress({ active: true, label, progress: (i + 1) / total })
+          const data = await renderInWindow({ kind: 'videoFrame', index: i, time: i / req.fps }, 30000)
+          job.progress = (i + 1) / total
+          if (!job.abort.signal.aborted) sendExportProgress({ active: true, label, progress: job.progress })
           return data as Uint8Array
-        })
+        }, job.abort.signal)
       sendExportProgress({ active: false, label: 'Exported', progress: 1, path: req.path })
       return { path: req.path, frames }
     } catch (err) {
+      if (err instanceof RenderCancelled) {
+        sendExportProgress({ active: false, label: 'Render stopped', progress: 0 })
+        throw new Error('Render cancelled. The partial file was deleted.')
+      }
       sendExportProgress({ active: false, label: 'Export failed', progress: 0, error: err instanceof Error ? err.message : String(err) })
       throw err
     } finally {
-      await renderInWindow({ kind: 'videoEnd' }).catch(() => undefined)
+      if (currentRender === job) currentRender = null
+      await renderInWindow({ kind: 'videoEnd' }, 10000).catch(() => undefined)
     }
+  },
+  cancelRender: () => cancelRender(),
+  renderStatus() {
+    const r = currentRender
+    return r && !r.abort.signal.aborted ? { label: r.label, progress: r.progress, path: r.path } : null
   },
   async writeFile(path, data) {
     mkdirSync(dirname(path), { recursive: true })
@@ -202,17 +239,183 @@ async function startMcp(): Promise<void> {
 
 // ---------------------------------------------------------------- agent
 
+const getClient = (): ReturnType<typeof createClient> | null => {
+  if (mockApi) return createClient(settings.getKey() ?? 'mock-key', mockApi)
+  const key = settings.getKey()
+  return key ? createClient(key) : null
+}
+
+/** Parallel animators started by the lead agent, one per clip, each with its own chat tab. */
+const workers = new Map<string, AgentSession>()
+let workerSeq = 0
+
+function clearWorkers(): void {
+  for (const w of workers.values()) w.stop()
+  workers.clear()
+}
+
+const parallelTool: AgentTool = {
+  name: 'animate_in_parallel',
+  description:
+    'Hand two or more separate animations to parallel animators, one new clip each, all working at the same time. Use this whenever the person asks for several separate animations in one message. ' +
+    'Each task gets its own clip and its own tab in the chat, where the person can watch it and give notes. ' +
+    'Each animator sees only its own `brief`, so write every brief as a complete description: the action, the feel, roughly how long, whether it loops, and every relevant detail the person gave. ' +
+    'Returns when all the animators have finished, with each one\'s summary. Not for a single animation, and not for steps of the same animation.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      tasks: {
+        type: 'array', minItems: 2, maxItems: 6,
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Clip name, short, e.g. "Heavy punch".' },
+            brief: { type: 'string', description: 'Everything the animator needs to know to make this animation.' },
+            length: { type: 'integer', minimum: 1, description: 'Last frame index. Default 30 (one second at 30 fps). The animator may change it.' },
+            fps: { type: 'integer', minimum: 1, maximum: 120, description: 'Default 30.' },
+            loop: { type: 'boolean', description: 'True for cycles (walk, run, idle).' }
+          },
+          required: ['name', 'brief']
+        }
+      },
+      rig: { type: 'string', description: 'Rig id or name every task animates. Defaults to the active rig.' }
+    },
+    required: ['tasks']
+  },
+  chip: (input) => {
+    const n = (input as { tasks?: unknown[] } | undefined)?.tasks?.length
+    return n ? `animating ${n} clips at once` : 'starting animators'
+  },
+  run: async (input, signal) => {
+    const a = input as { tasks?: { name?: string; brief?: string; length?: number; fps?: number; loop?: boolean }[]; rig?: string }
+    const tasks = (a.tasks ?? []).filter((t) => t && typeof t.name === 'string' && typeof t.brief === 'string' && t.name.trim() && t.brief.trim())
+    if (tasks.length < 2) return { text: 'animate_in_parallel needs at least two tasks, each with a name and a brief. Animate a single clip yourself.', isError: true }
+    if (tasks.length > 6) return { text: 'At most 6 animations at once. Split the request into batches.', isError: true }
+    const rig = getRig(store.project, a.rig)
+    const clips = store.mutate('agent', `create ${tasks.length} clips`, (p) => {
+      const made = tasks.map((t) => {
+        let name = t.name!.trim(), i = 2
+        while (p.clips.some((c) => c.name === name)) name = `${t.name!.trim()} ${i++}`
+        const clip = createClip(name, Math.max(1, Math.round(t.length ?? 30)), Math.min(120, Math.max(1, Math.round(t.fps ?? 30))), !!t.loop)
+        if (clip.loop) clip.priority = 'Movement'
+        p.clips.push(clip)
+        return clip
+      })
+      p.activeClipId = made[0].id
+      return made
+    })
+    const started = clips.map((clip, i) => {
+      const id = `w${++workerSeq}`
+      const session = new AgentSession({
+        registry, system: workerPrompt(clip.name, rig.name), getClient, getModel: () => settings.currentModel(),
+        bind: { clipId: clip.id, rigId: rig.id }, consumer: `agent:${id}`,
+        emit: (e) => win?.webContents.send('agent:event', { ...e, agent: id })
+      })
+      workers.set(id, session)
+      win?.webContents.send('agent:event', { type: 'spawn', agent: id, name: clip.name, clipId: clip.id, brief: tasks[i].brief!.trim() })
+      return { id, clip, session, brief: tasks[i].brief!.trim() }
+    })
+    const stopAll = (): void => started.forEach((w) => w.session.stop())
+    signal.addEventListener('abort', stopAll)
+    try {
+      await Promise.all(started.map((w) => w.session.send(w.brief)))
+    } finally {
+      signal.removeEventListener('abort', stopAll)
+    }
+    return {
+      text: JSON.stringify({
+        finished: started.map((w) => ({
+          clip: w.clip.name,
+          result: w.session.lastError ? `did not finish: ${w.session.lastError}` : w.session.lastReply() || 'ended without a summary',
+        })),
+        note: 'Each clip has its own tab in the chat where the person can review it and give that animator notes directly.'
+      })
+    }
+  }
+}
+
 const agent = new AgentSession({
   registry,
-  system: SYSTEM_PROMPT,
-  getClient: () => {
-    if (mockApi) return createClient(settings.getKey() ?? 'mock-key', mockApi)
-    const key = settings.getKey()
-    return key ? createClient(key) : null
-  },
+  system: LEAD_PROMPT,
+  extraTools: [parallelTool],
+  getClient,
   getModel: () => settings.currentModel(),
-  emit: (e) => win?.webContents.send('agent:event', e)
+  emit: (e) => {
+    if (e.type === 'reset') clearWorkers()
+    win?.webContents.send('agent:event', e)
+  }
 })
+
+// ---------------------------------------------------------------- MCP clients hand work to the built-in AI
+
+const prettyClient = (name: string | undefined): string => {
+  if (!name) return 'an MCP client'
+  if (/claude[-_ ]?code/i.test(name)) return 'Claude Code'
+  if (/claude/i.test(name)) return 'Claude'
+  return name
+}
+
+registry.register(defineTool({
+  name: 'ask_inbetween_ai',
+  description:
+    'Hand an animation job to Inbetween\'s built-in AI animator, which runs inside the app on the person\'s own Claude API key and poses, previews and checks the motion by itself. ' +
+    'Use this when the person asks for the Inbetween AI (the in-app AI, the built-in AI, "have Inbetween make it") to create or change the motion. The person watches it work in the app\'s chat panel. ' +
+    'Write `brief` as a complete description: the action, the feel, timing and length, whether it loops, and any detail the person gave. ' +
+    'Returns when the built-in AI has finished, with its summary and the clip it worked in. Afterwards, fine-tune the result yourself: get_clip, preview, check and motion_report, then fix timing, poses and contacts with your own tools. ' +
+    'Pass `new_clip` to have it start in a fresh clip, or `clip` to work in an existing one; otherwise it works in the active clip. Use cancel_render or ask the person to press Stop in the chat to interrupt it.',
+  schema: z.object({
+    brief: z.string().min(1).describe('Everything the built-in AI needs to know to make the animation.'),
+    clip: z.string().optional().describe('Existing clip id or name to work in. It becomes the active clip.'),
+    new_clip: z.object({
+      name: z.string().min(1),
+      length: z.number().int().min(1).optional().describe('Last frame index. Default 30.'),
+      fps: z.number().int().min(1).max(120).optional().describe('Default 30.'),
+      loop: z.boolean().optional()
+    }).optional().describe('Create this clip first and have the built-in AI work in it.'),
+    rig: z.string().optional().describe('Rig id or name to animate. It becomes the active rig. Default: the active rig.')
+  }),
+  chip: () => 'handing off to the Inbetween AI',
+  concurrent: true,
+  mcpOnly: true,
+  handler: async (a, ctx) => {
+    if (!mockApi && !settings.getKey()) {
+      return { text: 'The Inbetween AI has no Claude API key yet. Ask the person to add one in Inbetween > Settings, or animate it yourself with the other tools.', isError: true }
+    }
+    if (agent.running) return { text: 'The Inbetween AI is busy with another request in the chat panel. Wait for it to finish (or ask the person to stop it), then try again.', isError: true }
+    const p = store.project
+    const rig = a.rig ? getRig(p, a.rig) : undefined
+    if (a.new_clip) {
+      const nc = a.new_clip
+      store.mutate('mcp', `create clip ${nc.name}`, (proj) => {
+        let name = nc.name.trim(), i = 2
+        while (proj.clips.some((c) => c.name === name)) name = `${nc.name.trim()} ${i++}`
+        const clip = createClip(name, nc.length ?? 30, nc.fps ?? 30, !!nc.loop)
+        if (clip.loop) clip.priority = 'Movement'
+        proj.clips.push(clip)
+        proj.activeClipId = clip.id
+        if (rig) proj.activeRigId = rig.id
+      })
+    } else if (a.clip || rig) {
+      const clip = a.clip ? getClip(p, a.clip) : undefined
+      store.setActive({ ...(clip ? { activeClipId: clip.id } : {}), ...(rig ? { activeRigId: rig.id } : {}) })
+    }
+    const from = prettyClient(ctx.consumer?.startsWith('mcp:') ? mcp.clientName(ctx.consumer.slice(4)) : undefined)
+    win?.webContents.send('agent:event', { type: 'user_message', text: a.brief.trim(), from })
+    await agent.send(
+      `${a.brief.trim()}\n\n(This request came from ${from}, which will review and fine-tune your result afterwards. ` +
+      'Nobody can answer questions while you work, so make reasonable choices, finish the animation, check and preview it, then end with a short summary: what you made, which clip, and anything you were unsure of.)'
+    )
+    const clip = store.project.clips.find((c) => c.id === store.project.activeClipId)
+    if (agent.lastError) return { text: `The Inbetween AI did not finish: ${agent.lastError}`, isError: true }
+    if (agent.lastStopped) return { text: 'The person stopped the Inbetween AI before it finished. Ask them how they want to continue.', isError: true }
+    return {
+      finished: true,
+      clip: clip ? { id: clip.id, name: clip.name, length: clip.length, fps: clip.fps, loop: clip.loop } : null,
+      summary: agent.lastReply() || 'It ended without a summary.',
+      next: 'Review it now (get_clip, preview, check, motion_report) and fine-tune whatever needs it with your own tools.'
+    }
+  }
+}))
 
 // ---------------------------------------------------------------- state push
 
@@ -294,6 +497,9 @@ function openProjectFile(path: string): { ok: boolean; error?: string } {
 }
 
 function addRig(rig: Rig, from: string): void {
+  // Convert a metre-sized model to the scene's studs and stand it beside what is already there.
+  const notes = settleNewRig(store.project, rig)
+  if (notes.length) win?.webContents.send('toast', { message: `Imported ${rig.name}. ${notes.join(' ')} Ask the AI to move or resize it if needed.`, kind: 'info' })
   store.mutate('user', `imported rig "${rig.name}" from ${from}`, (p) => {
     let n = rig.name, i = 2
     while (p.rigs.some((x) => x.name === n)) n = `${rig.name} ${i++}`
@@ -321,8 +527,8 @@ async function fileAction(action: string): Promise<{ ok: boolean; path?: string;
     if (action === 'saveAs') return saveProject(true)
     if (action === 'importRig') {
       const r = await dialog.showOpenDialog(win!, {
-        title: 'Import rig', properties: ['openFile'],
-        filters: [{ name: 'Rigs (glTF, Roblox rig JSON)', extensions: ['glb', 'gltf', 'json'] }]
+        title: 'Import a model or rig', properties: ['openFile'],
+        filters: [{ name: 'Models and rigs (glTF, GLB, Roblox rig JSON)', extensions: ['glb', 'gltf', 'json'] }]
       })
       if (r.canceled || !r.filePaths[0]) return { ok: false }
       const path = r.filePaths[0]
@@ -412,13 +618,24 @@ ipcMain.handle('studio:install', () => {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
 })
-ipcMain.handle('agent:send', (_e, text: string, view: ViewContext) => {
-  void agent.send(text, view)
+ipcMain.handle('agent:send', (_e, text: string, view: ViewContext, worker?: string) => {
+  void (worker ? workers.get(worker) : agent)?.send(text, view)
 })
-ipcMain.handle('agent:stop', () => agent.stop())
+ipcMain.handle('agent:stop', (_e, worker?: string) => {
+  if (worker) workers.get(worker)?.stop()
+  else {
+    agent.stop()
+    for (const w of workers.values()) w.stop()
+    // Stopping the AI also stops a video it is rendering.
+    cancelRender('agent')
+  }
+})
+ipcMain.handle('export:cancel', () => {
+  cancelRender()
+})
 ipcMain.handle('agent:reset', () => agent.reset())
-ipcMain.handle('agent:retry', () => {
-  void agent.retry()
+ipcMain.handle('agent:retry', (_e, worker?: string) => {
+  void (worker ? workers.get(worker) : agent)?.retry()
 })
 ipcMain.handle('export:run', async (_e, args: Record<string, unknown>) => {
   let path = args.path as string | undefined
@@ -462,6 +679,12 @@ function menuSend(action: string): void {
 
 function buildMenu(): void {
   const isMac = process.platform === 'darwin'
+  // Single-key shortcuts are handled by the window, which knows when a text field has focus. macOS ignores
+  // registerAccelerator: false and would fire them from the menu on every keystroke, even while typing in the
+  // chat box, so there the key is only shown in the label.
+  const bare = (label: string, key: string, action: string): MenuItemConstructorOptions => (isMac
+    ? { label: `${label}  (${key})`, click: () => menuSend(action) }
+    : { label, accelerator: key, registerAccelerator: false, click: () => menuSend(action) })
   const template: MenuItemConstructorOptions[] = [
     ...(isMac ? [{
       label: 'Inbetween',
@@ -481,7 +704,7 @@ function buildMenu(): void {
         { label: 'Save', accelerator: 'CmdOrCtrl+S', click: () => void fileAction('save').then(reportFileResult) },
         { label: 'Save As…', accelerator: 'CmdOrCtrl+Shift+S', click: () => void fileAction('saveAs').then(reportFileResult) },
         { type: 'separator' },
-        { label: 'Import Rig…', click: () => void fileAction('importRig').then(reportFileResult) },
+        { label: 'Import Model or Rig…', accelerator: 'CmdOrCtrl+I', click: () => void fileAction('importRig').then(reportFileResult) },
         { label: 'Import Roblox Animation…', click: () => void fileAction('importAnimation').then(reportFileResult) },
         { label: 'Export…', accelerator: 'CmdOrCtrl+E', click: () => menuSend('export') },
         ...(isMac ? [] : [{ type: 'separator' as const }, { label: 'Settings…', accelerator: 'Ctrl+,', click: () => menuSend('settings') }, { type: 'separator' as const }, { role: 'quit' as const }])
@@ -495,7 +718,7 @@ function buildMenu(): void {
         { type: 'separator' },
         { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' },
         { type: 'separator' },
-        { label: 'Key Pose at Playhead', accelerator: 'K', registerAccelerator: false, click: () => menuSend('keyPose') },
+        bare('Key Pose at Playhead', 'K', 'keyPose'),
         { label: 'Delete Keys at Playhead', click: () => menuSend('deleteKeys') }
       ]
     },
@@ -503,8 +726,8 @@ function buildMenu(): void {
       label: 'View',
       submenu: [
         { label: 'Toggle Chat', accelerator: 'CmdOrCtrl+\\', click: () => menuSend('toggleChat') },
-        { label: 'Frame Rig', accelerator: 'F', registerAccelerator: false, click: () => menuSend('frame') },
-        { label: 'First-Person View', accelerator: 'V', registerAccelerator: false, click: () => menuSend('firstPerson') },
+        bare('Frame Rig', 'F', 'frame'),
+        bare('First-Person View', 'V', 'firstPerson'),
         { type: 'separator' },
         { label: 'Theme', submenu: (['system', 'light', 'dark'] as const).map((t) => ({ label: t[0].toUpperCase() + t.slice(1), type: 'radio' as const, checked: settings.settings.theme === t, click: () => {
           settings.update({ theme: t })
@@ -518,10 +741,10 @@ function buildMenu(): void {
     {
       label: 'Playback',
       submenu: [
-        { label: 'Play / Pause', accelerator: 'Space', registerAccelerator: false, click: () => menuSend('playPause') },
-        { label: 'Previous Frame', accelerator: 'Left', registerAccelerator: false, click: () => menuSend('prevFrame') },
-        { label: 'Next Frame', accelerator: 'Right', registerAccelerator: false, click: () => menuSend('nextFrame') },
-        { label: 'Toggle Loop', accelerator: 'L', registerAccelerator: false, click: () => menuSend('toggleLoop') }
+        bare('Play / Pause', 'Space', 'playPause'),
+        bare('Previous Frame', 'Left', 'prevFrame'),
+        bare('Next Frame', 'Right', 'nextFrame'),
+        bare('Toggle Loop', 'L', 'toggleLoop')
       ]
     },
     { role: 'windowMenu' },

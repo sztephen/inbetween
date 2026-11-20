@@ -70,6 +70,6 @@ describe('first-person posing and preview through the tools', () => {
     expect(bad.isError).toBe(true)
     expect(bad.text).toMatch(/no head bone/)
     const noGoal = await h.raw('set_pose', { rig: 'r15', frame: 3, goals: { right_hand: {} } })
-    expect(noGoal.text).toMatch(/needs a position or a view/)
+    expect(noGoal.text).toMatch(/needs a position, a view/)
   })
 })

@@ -69,6 +69,8 @@ export interface Rig {
   forward?: Vec3
   /** Placement of the rig in the scene. */
   origin: Xform
+  /** Uniform scale applied to the source file's size (already baked into bones and shapes). Default 1. */
+  scale?: number
   /** External mesh for display/export (glTF rigs). */
   mesh?: { type: 'glb'; path: string }
   /** Free-form source metadata (Roblox model name, etc). */
@@ -111,6 +113,20 @@ export interface Contact {
   rotation?: Quat
 }
 
+/**
+ * Carries one rig on a bone of another for a frame range (a sword in a hand, a hat on a head):
+ * the carried rig's placement becomes world(bone) * offset, and its own keys play on top.
+ */
+export interface Attachment {
+  id: string
+  rig: string
+  toRig: string
+  toBone: string
+  start: number
+  end: number
+  offset: Xform
+}
+
 export interface Marker {
   name: string
   frame: number
@@ -141,6 +157,8 @@ export interface Clip {
   /** ikTracks[rigId][chainName] */
   ikTracks: Record<string, Record<string, IKKey[]>>
   contacts: Contact[]
+  /** Optional so older project files load unchanged. */
+  attachments?: Attachment[]
   markers: Marker[]
   camera: CameraKey[]
 }

@@ -9,6 +9,12 @@ const sideOf = (name: string): 'left' | 'right' | null => {
   return null
 }
 
+/** The head bone by name: "Head", "mixamorig:Head", "DEF-head", then any "head" bone that is not an end/top marker. */
+export function detectHead(rig: Rig): string | undefined {
+  const find = (re: RegExp, not?: RegExp): BoneDef | undefined => rig.bones.find((b) => re.test(b.name) && !not?.test(b.name))
+  return (find(/^head$/i) ?? find(/head$/i) ?? find(/head/i, /end|top|nub|tip|jaw|eye|brow|lip|hair|ear|nose|mouth|tongue|teeth/i))?.name
+}
+
 /**
  * Detect arm and leg IK chains on an imported rig from bone names (Hand/Foot ends, with their
  * parent and grandparent as the two-bone limb), and pick hips/head bones. Works for Roblox
@@ -64,7 +70,7 @@ export function autoSetup(rig: Rig): void {
   rig.hips = hips?.name ?? rig.root
   const hb = bones.get(rig.hips)
   if (hb && !hb.locked) hb.translatable = true
-  rig.head = (find(/^head$/i) ?? find(/head$/i))?.name
+  rig.head = detectHead(rig)
   // Roblox rigs that use the standard R15 part names get the R15 joint limits.
   if (rig.source === 'roblox') for (const b of rig.bones) if (!b.limits && R15_LIMITS[b.name] && b.kind === 'motor6d') b.limits = R15_LIMITS[b.name]
 }

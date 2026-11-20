@@ -5,7 +5,7 @@ export const IconPlay = (): React.JSX.Element => <svg width="14" height="14" vie
 export const IconPause = (): React.JSX.Element => <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3.5" y="2.5" width="3.2" height="11" rx="1" /><rect x="9.3" y="2.5" width="3.2" height="11" rx="1" /></svg>
 export const IconLoop = (): React.JSX.Element => <S><path d="M3 8a4.5 4.5 0 0 1 4.5-4.5H12" /><path d="m10 1.5 2 2-2 2" /><path d="M13 8a4.5 4.5 0 0 1-4.5 4.5H4" /><path d="m6 14.5-2-2 2-2" /></S>
 export const IconChat = (): React.JSX.Element => <S><path d="M2.5 4.5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H7l-3 2.5v-2.5a2 2 0 0 1-1.5-2Z" /></S>
-export const IconGear = (): React.JSX.Element => <S><circle cx="8" cy="8" r="2.1" /><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.15 1.15M11.25 11.25l1.15 1.15M3.6 12.4l1.15-1.15M11.25 4.75l1.15-1.15" /></S>
+export const IconGear = (): React.JSX.Element => <S><path strokeWidth="1.3" d="M6.82 3.24 7.08 1.56h1.84l.26 1.68 1.35.56 1.37-1 1.3 1.3-1 1.37.56 1.35 1.68.26v1.84l-1.68.26-.56 1.35 1 1.37-1.3 1.3-1.37-1-1.35.56-.26 1.68H7.08l-.26-1.68-1.35-.56-1.37 1-1.3-1.3 1-1.37-.56-1.35-1.68-.26V7.08l1.68-.26.56-1.35-1-1.37 1.3-1.3 1.37 1Z" /><circle cx="8" cy="8" r="2" strokeWidth="1.3" /></S>
 export const IconExport = (): React.JSX.Element => <S><path d="M8 10V2.5" /><path d="m5 5 3-3 3 3" /><path d="M2.5 10v2a1.5 1.5 0 0 0 1.5 1.5h8a1.5 1.5 0 0 0 1.5-1.5v-2" /></S>
 export const IconEye = (): React.JSX.Element => <S><path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8Z" /><circle cx="8" cy="8" r="1.9" /></S>
 export const IconCheck = (): React.JSX.Element => <S size={11}><path d="m3 8.5 3.2 3L13 4.5" /></S>

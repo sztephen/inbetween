@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
-import { evaluateRig, sampleCamera } from '@core/clip'
+import { evaluateRig, rigAtFrame, sampleCamera } from '@core/clip'
 import { firstPersonCamera, type FirstPersonMode } from '@core/firstPerson'
 import { computeWorld, effectorWorld, rigBounds, type WorldPose } from '@core/rig'
 import type { Clip, Pose, Project, Rig, Vec3 } from '@core/types'
@@ -114,7 +114,7 @@ export class RigView {
   }
 
   static sign(rig: Rig): string {
-    return `${rig.id}|${rig.bones.length}|${rig.source}|${rig.mesh?.path ?? ''}|${rig.bones.map((b) => b.name + (b.shape ? b.shape.size.join(',') : '')).join(';')}`
+    return `${rig.id}|${rig.bones.length}|${rig.source}|${rig.mesh?.path ?? ''}|${rig.scale ?? 1}|${rig.origin.p.join(',')}|${rig.origin.q.join(',')}|${rig.bones.map((b) => b.name + (b.shape ? b.shape.size.join(',') : '')).join(';')}`
   }
 
   private addVisual(bone: string, geo: THREE.BufferGeometry, kind: BoneVisual['kind'], parent?: string): void {
@@ -153,6 +153,7 @@ export class RigView {
       this.gltfRoot = gltf.scene
       this.gltfRoot.position.set(...rig.origin.p)
       this.gltfRoot.quaternion.set(...rig.origin.q)
+      this.gltfRoot.scale.setScalar(rig.scale ?? 1)
       this.group.add(this.gltfRoot)
       this.lastPose && this.applyGltf(this.lastPose)
     } catch (err) {
@@ -176,8 +177,10 @@ export class RigView {
     }
   }
 
-  apply(pose: Pose, world: WorldPose): void {
+  /** `origin` is where the rig stands on this frame (it differs from rig.origin while the rig is being carried). */
+  apply(pose: Pose, world: WorldPose, origin?: { p: Vec3; q: [number, number, number, number] }): void {
     this.lastPose = pose
+    if (origin) this.origin = origin
     for (const v of this.visuals) {
       if (v.kind === 'box') {
         const w = world.bone[v.bone]
@@ -196,8 +199,15 @@ export class RigView {
       }
     }
     for (const chain of this.rig.chains) this.handles.get(chain.name)!.position.set(...effectorWorld(this.rig, world, chain))
-    if (this.gltfRoot) this.applyGltf(pose)
+    if (this.gltfRoot) {
+      if (this.origin) {
+        this.gltfRoot.position.set(...this.origin.p)
+        this.gltfRoot.quaternion.set(...this.origin.q)
+      }
+      this.applyGltf(pose)
+    }
   }
+  private origin: { p: Vec3; q: [number, number, number, number] } | null = null
 
   /** Hide one bone's geometry (the head, in first person). */
   setBoneHidden(bone: string | null): void {
@@ -404,8 +414,9 @@ export class Stage {
     for (const rig of this.project.rigs) {
       const view = this.views.get(rig.id)
       if (!view) continue
-      const pose = override?.rigId === rig.id ? override.pose : clip ? evaluateRig(clip, rig, frame) : {}
-      view.apply(pose, computeWorld(rig, pose))
+      const at = rigAtFrame(this.project.rigs, clip, rig, frame)
+      const pose = override?.rigId === rig.id ? override.pose : clip ? evaluateRig(clip, at, frame) : {}
+      view.apply(pose, computeWorld(at, pose), at.origin)
     }
   }
 
@@ -426,7 +437,8 @@ export class Stage {
     for (const rig of this.project.rigs) {
       if (rigIds && !rigIds.includes(rig.id)) continue
       for (const f of frames.length ? frames : [0]) {
-        const b = rigBounds(rig, computeWorld(rig, clip ? evaluateRig(clip, rig, f) : {}))
+        const at = rigAtFrame(this.project.rigs, clip, rig, f)
+        const b = rigBounds(at, computeWorld(at, clip ? evaluateRig(clip, at, f) : {}))
         box.expandByPoint(tmpV.set(...b.min))
         box.expandByPoint(tmpV.set(...b.max))
       }
@@ -525,8 +537,9 @@ export class Stage {
         found = true
         const pts: number[] = []
         for (let f = 0; f <= clip.length; f++) {
-          const w = computeWorld(rig, evaluateRig(clip, rig, f))
-          const p = chain ? effectorWorld(rig, w, chain) : w.bone[bone!.name].p
+          const at = rigAtFrame(this.project.rigs, clip, rig, f)
+          const w = computeWorld(at, evaluateRig(clip, at, f))
+          const p = chain ? effectorWorld(at, w, chain) : w.bone[bone!.name].p
           pts.push(p[0], p[1], p[2])
         }
         const geo = new THREE.BufferGeometry()

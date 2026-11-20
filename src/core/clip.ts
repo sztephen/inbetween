@@ -1,7 +1,7 @@
 import { ease } from './easing'
 import { solveChain } from './ik'
-import { qid, qslerp, vadd, vlerp, vscale, type Quat, type Vec3 } from './math'
-import { computeWorld, getChain, type WorldPose } from './rig'
+import { qid, qslerp, vadd, vlerp, vscale, xmul, type Quat, type Vec3 } from './math'
+import { computeWorld, getChain, rigBounds, restWorld, scaleRig, type WorldPose } from './rig'
 import type { CameraKey, Clip, Contact, EaseDir, EaseStyle, IKKey, Key, Pose, Project, Rig } from './types'
 
 let idCounter = 0
@@ -135,6 +135,48 @@ export function evaluateRig(clip: Clip, rig: Rig, frame: number, opts: { skipCon
   return pose
 }
 
+/**
+ * The rig as it stands at a frame: the same rig, unless an attachment is carrying it, in which case
+ * a copy placed on the bone it is attached to. Evaluate and draw attached rigs through this.
+ */
+export function rigAtFrame(rigs: Rig[], clip: Clip | undefined, rig: Rig, frame: number, depth = 0): Rig {
+  const a = clip?.attachments?.find((x) => x.rig === rig.id && frame >= x.start && frame <= x.end)
+  if (!a || depth > 4) return rig
+  const carrier = rigs.find((r) => r.id === a.toRig)
+  if (!carrier || carrier.id === rig.id) return rig
+  const c = rigAtFrame(rigs, clip, carrier, frame, depth + 1)
+  const bone = computeWorld(c, evaluateRig(clip!, c, frame)).bone[a.toBone]
+  if (!bone) return rig
+  return { ...rig, origin: xmul(bone, a.offset) }
+}
+
+/** Metres to Roblox studs (one stud is 0.28 m). */
+export const STUDS_PER_METER = 1 / 0.28
+
+/**
+ * Make a newly imported rig sit sensibly in the scene: convert a metre-sized model to studs when the
+ * scene is in studs (unless a scale was chosen), and stand it beside what is already there instead of
+ * inside it (unless a position was chosen). Returns notes for whoever imported it.
+ */
+export function settleNewRig(project: Project, rig: Rig, opts: { scaled?: boolean; placed?: boolean } = {}): string[] {
+  const notes: string[] = []
+  const scene = project.rigs.find((r) => r.id === project.activeRigId) ?? project.rigs[0]
+  if (!opts.scaled && scene && scene.units === 'studs' && rig.units === 'meters') {
+    scaleRig(rig, STUDS_PER_METER)
+    rig.units = 'studs'
+    notes.push(`Scaled by ${STUDS_PER_METER.toFixed(2)} to convert metres to studs, matching ${scene.name}.`)
+  }
+  if (!opts.placed && project.rigs.length) {
+    let maxX = -Infinity
+    for (const r of project.rigs) maxX = Math.max(maxX, rigBounds(r, restWorld(r)).max[0])
+    const b = rigBounds(rig, restWorld(rig))
+    const gap = Math.max(0.5, (b.max[0] - b.min[0]) * 0.25)
+    rig.origin = { p: [rig.origin.p[0] + maxX + gap - b.min[0], rig.origin.p[1], rig.origin.p[2]], q: rig.origin.q }
+    notes.push(`Placed beside the existing rigs at x ${rig.origin.p[0].toFixed(2)}.`)
+  }
+  return notes
+}
+
 export function evaluateWorld(clip: Clip, rig: Rig, frame: number): { pose: Pose; world: WorldPose } {
   const pose = evaluateRig(clip, rig, frame)
   return { pose, world: computeWorld(rig, pose) }
@@ -210,6 +252,19 @@ export function getRig(project: Project, idOrName?: string | null): Rig {
   const rig = project.rigs.find((r) => r.id === key) ?? project.rigs.find((r) => r.name === key)
   if (!rig) throw new Error(`Unknown rig "${key}". Rigs: ${project.rigs.map((r) => `${r.name} (${r.id})`).join(', ') || '(none)'}`)
   return rig
+}
+
+/**
+ * The rig a first-person view looks through: the named rig, else the active rig when it has a head,
+ * else the first rig that has one (so a selected prop or camera rig does not switch first person off).
+ */
+export function firstPersonRig(project: Project, idOrName?: string | null): Rig | undefined {
+  if (idOrName) {
+    const r = project.rigs.find((x) => x.id === idOrName) ?? project.rigs.find((x) => x.name === idOrName)
+    return r?.head ? r : undefined
+  }
+  const active = project.rigs.find((r) => r.id === project.activeRigId)
+  return active?.head ? active : project.rigs.find((r) => r.head)
 }
 
 export { getChain, qid }

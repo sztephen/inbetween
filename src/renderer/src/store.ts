@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { Clip, Rig } from '@core/types'
+import { firstPersonRig } from '@core/clip'
 import type { AgentErrorKind, DocState, ExportProgress, InbetweenApi, SettingsState, ToolEvent, Usage } from '../../shared/api'
 
 export const api = (window as unknown as { inbetween: InbetweenApi & { onToast(fn: (t: { message: string; kind: string }) => void): () => void; ready(): void } }).inbetween
@@ -17,6 +18,8 @@ export interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | 'error'
   text?: string
+  /** Who sent a user message when it was not the person (e.g. "Claude Code"). */
+  from?: string
   parts: ChatPart[]
   thinking?: string
   streaming?: boolean
@@ -24,6 +27,15 @@ export interface ChatMessage {
   model?: string
   errorKind?: AgentErrorKind
   retryable?: boolean
+}
+
+/** One parallel animator's conversation, shown as a tab in the chat. */
+export interface ChatThread {
+  id: string
+  name: string
+  clipId: string
+  messages: ChatMessage[]
+  busy: boolean
 }
 
 export interface Toast {
@@ -52,6 +64,10 @@ interface State {
   sheet: 'settings' | 'export' | null
   messages: ChatMessage[]
   agentBusy: boolean
+  /** Parallel animators, in the order they were started. */
+  threads: ChatThread[]
+  /** 'main' or a thread id. */
+  chatTab: string
   /** external (MCP) tool activity shown as floating chips */
   activity: (ToolEvent & { at: number })[]
   toasts: Toast[]
@@ -66,7 +82,7 @@ let toastSeq = 0
 
 export const useStore = create<State>((set, get) => ({
   doc: null, settings: null, frame: 0, playing: false, speed: 1, selectedBone: null, selectedChain: null, gizmo: 'rotate', firstPerson: false,
-  selectedKeys: [], popped: {}, chatOpen: true, sheet: null, messages: [], agentBusy: false, activity: [], toasts: [],
+  selectedKeys: [], popped: {}, chatOpen: true, sheet: null, messages: [], agentBusy: false, threads: [], chatTab: 'main', activity: [], toasts: [],
   exportProgress: null, lightbox: null, resolvedTheme: 'dark',
   set: (patch) => set(patch),
   toast: (message, kind = 'info', path) => {
@@ -78,6 +94,9 @@ export const useStore = create<State>((set, get) => ({
 
 export const activeClip = (s: { doc: DocState | null }): Clip | undefined => s.doc?.project.clips.find((c) => c.id === s.doc!.project.activeClipId)
 export const activeRig = (s: { doc: DocState | null }): Rig | undefined => s.doc?.project.rigs.find((r) => r.id === s.doc!.project.activeRigId) ?? s.doc?.project.rigs[0]
+
+/** The rig first person looks through (the active rig, or the first character when the active rig has no head). */
+export const fpRig = (s: { doc: DocState | null }): Rig | undefined => (s.doc ? firstPersonRig(s.doc.project) : undefined)
 
 export const isMac = api.platform === 'darwin'
 export const modKey = isMac ? '⌘' : 'Ctrl+'

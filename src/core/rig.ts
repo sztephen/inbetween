@@ -126,6 +126,23 @@ export function rigBounds(rig: Rig, world: WorldPose): { min: Vec3; max: Vec3 } 
   return { min, max }
 }
 
+/** Resize a rig in place by a uniform factor (bones, shapes, effector points; a glTF mesh follows via rig.scale). */
+export function scaleRig(rig: Rig, factor: number): void {
+  if (!(factor > 0) || !isFinite(factor)) throw new Error('Scale must be a positive number.')
+  if (factor === 1) return
+  const mul = (v: Vec3): Vec3 => [v[0] * factor, v[1] * factor, v[2] * factor]
+  for (const b of rig.bones) {
+    b.pre = { p: mul(b.pre.p), q: b.pre.q }
+    b.post = { p: mul(b.post.p), q: b.post.q }
+    if (b.shape) b.shape = { size: mul(b.shape.size), ...(b.shape.offset ? { offset: mul(b.shape.offset) } : {}) }
+  }
+  for (const c of rig.chains) c.tip = mul(c.tip)
+  // glTF source nodes: bone-space positions are source positions times parentScale.
+  const nodes = rig.meta?.gltfNodes as Record<string, { parentScale: number }> | undefined
+  if (nodes) for (const n in nodes) nodes[n].parentScale *= factor
+  rig.scale = (rig.scale ?? 1) * factor
+}
+
 export function rigHeight(rig: Rig): number {
   const b = rigBounds(rig, restWorld(rig))
   return Math.max(1e-3, b.max[1] - b.min[1])

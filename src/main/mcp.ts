@@ -59,6 +59,11 @@ export class McpHost {
   get running(): boolean {
     return !!this.http?.listening
   }
+  /** The name an MCP client gave when it connected (e.g. "claude-code"), by session id. */
+  clientName(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.server.getClientVersion()?.name
+  }
+
   get clients(): number {
     return this.sessions.size
   }

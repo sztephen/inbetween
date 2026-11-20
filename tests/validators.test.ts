@@ -130,3 +130,23 @@ describe('validators', () => {
     expect(probs[0].amount).toBeCloseTo(0.2, 1)
   })
 })
+
+describe('balance and timing', () => {
+  it('balance: flags a held pose with the weight far in front of the feet, not a centred one', () => {
+    const c = clipWith()
+    expect(names(c, 'balance')).toEqual([])
+    const lean = (f: number): void => void opSetPose({ clip: c, rig, frame: f, spec: { hips: { position: [0, -0.2, -1] } } })
+    lean(0)
+    lean(20)
+    const probs = checkClip(c, rig).filter((p) => p.check === 'balance')
+    expect(probs).toHaveLength(1)
+    expect(probs[0].message).toMatch(/forward/)
+    expect(probs[0].severity).toBe('warning')
+  })
+
+  it('balance: a pose the character only moves through is not flagged', () => {
+    const c = clipWith()
+    opSetPose({ clip: c, rig, frame: 10, spec: { hips: { position: [0, -0.2, -1] } } })
+    expect(names(c, 'balance')).toEqual([])
+  })
+})

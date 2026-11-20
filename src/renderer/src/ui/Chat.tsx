@@ -1,6 +1,6 @@
 import { motion } from 'motion/react'
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { api, reducedMotion, useStore, type ChatMessage, type ChatPart, type ChatTool } from '../store'
+import { api, command, reducedMotion, useStore, type ChatMessage, type ChatPart, type ChatTool } from '../store'
 import { IconAlert, IconCheck, IconSend, IconStop } from './icons'
 
 const spring = { type: 'spring' as const, stiffness: 480, damping: 30 }
@@ -75,14 +75,14 @@ function TextPart({ text, streaming }: { text: string; streaming: boolean }): Re
 
 const fmt = (n: number): string => (n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 
-const Message = memo(function Message({ m, onImage, isLast }: { m: ChatMessage; onImage: (src: string) => void; isLast: boolean }) {
-  if (m.role === 'user') return <motion.div className="msg user" initial={reducedMotion() ? false : { opacity: 0, y: 10, scale: 0.97 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={spring}>{m.text}</motion.div>
+const Message = memo(function Message({ m, onImage, isLast, worker }: { m: ChatMessage; onImage: (src: string) => void; isLast: boolean; worker?: string }) {
+  if (m.role === 'user') return <motion.div className="msg user" initial={reducedMotion() ? false : { opacity: 0, y: 10, scale: 0.97 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={spring}>{m.from && <span className="msg-from">From {m.from}</span>}{m.text}</motion.div>
   if (m.role === 'error') {
     return (
       <motion.div className="msg error" role="alert" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={spring}>
         <span>{m.text}</span>
         <div className="row">
-          {m.retryable && isLast && <button className="btn small" onClick={() => void api.agentRetry()}>Retry</button>}
+          {m.retryable && isLast && <button className="btn small" onClick={() => void api.agentRetry(worker)}>Retry</button>}
           {(m.errorKind === 'no_key' || m.errorKind === 'auth') && <button className="btn small" onClick={() => useStore.getState().set({ sheet: 'settings' })}>Open Settings</button>}
         </div>
       </motion.div>
@@ -127,8 +127,15 @@ const SUGGESTIONS = [
 ]
 
 export function Chat(): React.JSX.Element {
-  const messages = useStore((s) => s.messages)
-  const busy = useStore((s) => s.agentBusy)
+  const mainMessages = useStore((s) => s.messages)
+  const mainBusy = useStore((s) => s.agentBusy)
+  const threads = useStore((s) => s.threads)
+  const tab = useStore((s) => s.chatTab)
+  // A tab per parallel animator; "All" is the lead conversation.
+  const thread = threads.find((t) => t.id === tab)
+  const worker = thread?.id
+  const messages = thread ? thread.messages : mainMessages
+  const busy = thread ? thread.busy : mainBusy
   const settings = useStore((s) => s.settings)
   const [text, setText] = useState('')
   const setLightbox = (src: string): void => useStore.getState().set({ lightbox: src })
@@ -151,16 +158,40 @@ export function Chat(): React.JSX.Element {
     const v = value.trim()
     if (!v || busy) return
     const s = useStore.getState()
-    s.set({ messages: [...s.messages, { id: `u${Date.now()}`, role: 'user', text: v, parts: [] }] })
+    const mine: ChatMessage = { id: `u${Date.now()}`, role: 'user', text: v, parts: [] }
+    if (worker) s.set({ threads: s.threads.map((t) => (t.id === worker ? { ...t, messages: [...t.messages, mine] } : t)) })
+    else s.set({ messages: [...s.messages, mine] })
     stick.current = true
     setText('')
-    void api.agentSend(v, { frame: s.frame, selectedBone: s.selectedBone })
+    void api.agentSend(v, { frame: s.frame, selectedBone: s.selectedBone }, worker)
+  }
+
+  const openTab = (id: string): void => {
+    const s = useStore.getState()
+    stick.current = true
+    s.set({ chatTab: id })
+    // Opening an animator's tab puts its clip on screen.
+    const t = s.threads.find((x) => x.id === id)
+    if (t && s.doc?.project.clips.some((c) => c.id === t.clipId) && s.doc.project.activeClipId !== t.clipId) {
+      void command({ type: 'setActive', clipId: t.clipId })
+      s.set({ frame: 0, playing: false, selectedKeys: [] })
+    }
   }
 
   const visible = messages.filter((m) => m.role !== 'assistant' || m.streaming || m.parts.length)
   return (
     <motion.aside className="chat panel" aria-label="Chat"
       initial={{ x: 380, opacity: 0 }} animate={{ x: 0, opacity: 1 }} exit={{ x: 380, opacity: 0 }} transition={{ type: 'spring', stiffness: 360, damping: 34 }}>
+      {threads.length > 0 && (
+        <div className="chat-tabs" role="tablist" aria-label="Animations in progress">
+          <button role="tab" aria-selected={!thread} onClick={() => openTab('main')}>All{mainBusy && <span className="dot" />}</button>
+          {threads.map((t) => (
+            <button key={t.id} role="tab" aria-selected={t.id === tab} title={t.busy ? `${t.name}: animating` : `${t.name}: finished`} onClick={() => openTab(t.id)}>
+              {t.name}{t.busy ? <span className="dot" /> : <IconCheck />}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="chat-scroll" ref={scroller} onScroll={(e) => {
         const el = e.currentTarget
         stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
@@ -175,10 +206,10 @@ export function Chat(): React.JSX.Element {
             <div className="suggest">{SUGGESTIONS.map((s) => <button key={s} onClick={() => send(s)}>{s}</button>)}</div>
           </div>
         )}
-        {visible.map((m, i) => <Message key={m.id} m={m} onImage={setLightbox} isLast={i === visible.length - 1} />)}
+        {visible.map((m, i) => <Message key={m.id} m={m} onImage={setLightbox} isLast={i === visible.length - 1} worker={worker} />)}
       </div>
       <div className="composer">
-        <textarea ref={area} rows={1} value={text} placeholder={visible.length ? 'Give a note…' : 'What should the rig do?'} aria-label="Message"
+        <textarea ref={area} rows={1} value={text} placeholder={thread ? `Give a note on ${thread.name}…` : visible.length ? 'Give a note…' : 'What should the rig do?'} aria-label="Message"
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -190,9 +221,20 @@ export function Chat(): React.JSX.Element {
           <select aria-label="Model" value={settings?.settings.model ?? ''} onChange={(e) => void api.setSettings({ model: e.target.value }).then((settings) => useStore.getState().set({ settings }))}>
             {(settings?.models ?? []).map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
           </select>
-          {visible.length > 0 && !busy && <button className="quiet" title="Start a new conversation" onClick={() => void api.agentReset()}>New chat</button>}
+          {(() => {
+            const model = settings?.models.find((m) => m.id === settings.settings.model) ?? settings?.models[0]
+            const effort = settings?.settings.effort ?? model?.effort ?? 'medium'
+            const levels = ['low', 'medium', 'high']
+            return (
+              <select aria-label="Thinking effort" title="How hard the AI thinks. Higher makes better animation but is slower and costs more." value={effort}
+                onChange={(e) => void api.setSettings({ effort: e.target.value as 'low' | 'medium' | 'high' }).then((settings) => useStore.getState().set({ settings }))}>
+                {(levels.includes(effort) ? levels : [...levels, effort]).map((l) => <option key={l} value={l}>{l[0].toUpperCase() + l.slice(1)} effort</option>)}
+              </select>
+            )
+          })()}
+          {visible.length > 0 && !busy && !thread && !threads.some((t) => t.busy) && <button className="quiet" title="Start a new conversation" onClick={() => void api.agentReset()}>New chat</button>}
           {busy
-            ? <motion.button className="send stop" whileTap={{ scale: 0.88 }} aria-label="Stop" title="Stop" onClick={() => void api.agentStop()}><IconStop /></motion.button>
+            ? <motion.button className="send stop" whileTap={{ scale: 0.88 }} aria-label="Stop" title="Stop" onClick={() => void api.agentStop(worker)}><IconStop /></motion.button>
             : <motion.button className="send" whileTap={{ scale: 0.88 }} aria-label="Send" title="Send (Enter)" disabled={!text.trim()} onClick={() => send()}><IconSend /></motion.button>}
         </div>
       </div>
