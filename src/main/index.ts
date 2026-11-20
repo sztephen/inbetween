@@ -388,6 +388,8 @@ ipcMain.handle('settings:set', async (_e, patch: Partial<Settings>) => {
     ;(mcp as unknown as { opts: { port: number } }).opts.port = settings.settings.mcpPort
     await startMcp()
   }
+  // Every window state that mirrors settings (model picker, theme, chat) updates from this push.
+  pushSettings()
   return settingsState()
 })
 ipcMain.handle('key:set', async (_e, key: string | null) => {

@@ -187,7 +187,7 @@ export function Chat(): React.JSX.Element {
             }
           }} />
         <div className="row">
-          <select aria-label="Model" value={settings?.settings.model ?? ''} onChange={(e) => void api.setSettings({ model: e.target.value })}>
+          <select aria-label="Model" value={settings?.settings.model ?? ''} onChange={(e) => void api.setSettings({ model: e.target.value }).then((settings) => useStore.getState().set({ settings }))}>
             {(settings?.models ?? []).map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
           </select>
           {visible.length > 0 && !busy && <button className="quiet" title="Start a new conversation" onClick={() => void api.agentReset()}>New chat</button>}

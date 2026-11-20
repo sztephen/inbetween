@@ -426,6 +426,14 @@ async function run() {
     const mock = await startMock()
     const { app, page, errors } = await launch([`--mock-api=${mock.url}`])
     try {
+      // Model picker: choosing a model sticks, is saved, and is the model the next request uses.
+      const picker = page.locator('.composer select')
+      const options = await picker.locator('option').allTextContents()
+      assert(options.join('|') === 'Sonnet 5.5|Opus 5.5|Fable 5.2', `model picker options: ${options}`)
+      await picker.selectOption('claude-opus-5-5')
+      await sleep(300)
+      assert((await picker.inputValue()) === 'claude-opus-5-5', 'model picker did not keep the chosen model')
+      assert((await page.evaluate(() => window.inbetween.getSettings())).settings.model === 'claude-opus-5-5', 'chosen model was not saved')
       await page.locator('.composer textarea').fill('Make the character nod')
       await page.keyboard.press('Enter')
       await page.waitForSelector('.chip', { timeout: 15000 })
@@ -443,6 +451,7 @@ async function run() {
       assert(nod && nod.tracks.r15.Head.length === 3, 'agent tool calls did not edit the document')
       // Request shape: the three requests carry tools, adaptive thinking at medium effort, and the tool results with the preview image.
       const [r1, r2, r3] = mock.state.requests.map((r) => r.body)
+      assert(r1.model === 'claude-opus-5-5', `request used ${r1.model}, not the model picked in the UI`)
       assert(r1.thinking?.type === 'adaptive' && r1.output_config?.effort === 'medium', 'thinking/effort not set as intended')
       assert(r1.tools.length > 15 && r1.stream === true, 'tools or streaming missing from the request')
       assert(/Block the key poses/.test(typeof r1.system === 'string' ? r1.system : JSON.stringify(r1.system)), 'system prompt is missing the workflow')
@@ -453,6 +462,7 @@ async function run() {
       const h0 = mock.state.requests[0].headers
       assert(h0.authorization === 'Bearer mock-key' || h0['x-api-key'] === 'mock-key', 'API key was not sent with the request')
       await shot(page, '08-agent-done')
+      ok('model picker changes the model used')
       ok('agent loop: streaming text, tool chips, live document edits, preview image, usage', `${mock.state.requests.length} requests`)
 
       // manual edit is reported on the next turn
