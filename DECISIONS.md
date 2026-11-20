@@ -58,10 +58,11 @@ Contact sheets tint right limbs red and left limbs blue with a different shade p
 
 ## Platforms
 
-Built and tested on macOS (Apple Silicon). Windows is correct by construction (no platform-specific code beyond window chrome, the Plugins folder path and the ffmpeg file name) and covered by the GitHub Actions workflow, which runs the tests, the end-to-end script and the installer build on both macOS and Windows. That workflow has not run yet. Only the arm64 `.dmg` was built here; the Intel one builds from the same command.
+Built and tested on macOS (Apple Silicon). Windows is correct by construction (no platform-specific code beyond window chrome, the Plugins folder path and the ffmpeg file name) and covered by the GitHub Actions workflow, which runs the tests, the end-to-end script and the installer build on both macOS and Windows. That workflow has not run yet. Both macOS `.dmg` installers (arm64 and x64) were built here; only the arm64 app was launched and smoke-tested (MCP server and stdio launcher work from the packaged app).
 
 ## Smaller choices
 
+- `npm install` runs Electron's own `install-electron` step. This Electron version no longer downloads its binary during install by itself, and without it `npm run dev` fails on a fresh checkout.
 - Project files use the `.inbetween` extension (JSON inside).
 - The timeline loop toggle sets the clip's own loop flag, so what plays is what exports.
 - Typeface: Schibsted Grotesk, bundled. Accent: a blue-pencil blue, one accent in both themes.
