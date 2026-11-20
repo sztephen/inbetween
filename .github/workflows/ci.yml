@@ -35,9 +35,11 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+      - name: Fetch ffmpeg for video export
+        run: npm run ffmpeg
       - name: End-to-end (app + MCP client + mocked Claude API)
         # Needs a display and GPU; macOS and Windows runners have both.
-        run: node scripts/e2e.mjs shell mcp manual agent rigs
+        run: node scripts/e2e.mjs shell mcp manual export agent handoff rigs
       - name: Build installer
         run: npm run ${{ matrix.dist }}
         env:

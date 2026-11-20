@@ -1,0 +1,8 @@
+# Same line endings on every platform. SKILL.md and workflow.md are compared byte for byte
+# in tests and shipped inside the app, so Windows checkouts must not convert them to CRLF.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.icns binary
+*.ico binary
+*.glb binary
